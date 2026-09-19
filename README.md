@@ -104,7 +104,7 @@ python src/compare.py --capacities 0 2 4 7 --data data/profiles_30min.csv
 
 - [x] Problem formulation & scope
 - [x] Real data collected, cleaned, and resampled to 30-minute tariff-aligned slots
-- [ ] DP solver implemented & validated
+- [x] DP solver implemented & validated
 - [ ] Heuristic solver implemented & validated
 - [ ] Comparative evaluation (cost / runtime / scalability across the capacity sweep)
 - [ ] Report, code appendix, and video
