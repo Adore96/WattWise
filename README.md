@@ -109,10 +109,6 @@ python src/compare.py --capacities 0 2 4 7 --data data/profiles_30min.csv
 - [ ] Comparative evaluation (cost / runtime / scalability across the capacity sweep)
 - [ ] Report, code appendix, and video
 
-## Submission checklist
-
-Single ZIP (`Optimization-assignment.zip`) containing `members.txt`, `submission.txt` (dataset + GitHub + YouTube links), this repo with a genuine commit history, the 15-minute YouTube video, the PDF report, and a plain-text code appendix. Missing components score zero; Turnitin capped at 20%; one upload only; late resubmission caps at 45%.
-
 ## References
 
 - CEB optional domestic Time-of-Use tariff, May 2026 revision.
