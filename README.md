@@ -36,8 +36,7 @@ Five real days of household inverter/monitoring logs, 5-minute resolution, resam
 - **Sign convention**: positive `Battery(kW)` = discharging, negative = charging (verified against the logs, not assumed).
 - **Known data notes**: Sep 12's original log had a ~3-hour gap during the production ramp and was dropped in favor of a re-logged Sep 13; Sep 11 is missing one 5-minute reading at 05:20 (interpolated, negligible). Full write-up of every data issue and fix is in the report's Data Description
   section.
-
-Raw logs and the resampling step aren't checked in raw here for size/privacy — see `scripts/build_profiles.py` to regenerate `data/profiles_30min.csv` from your own `.xlsx` exports.
+  Raw logs and the resampling step aren't checked in raw here for size/privacy — see `scripts/build_profiles.py` to regenerate `data/profiles_30min.csv` from your own `.xlsx` exports.
 
 ## Repository structure
 
@@ -86,21 +85,33 @@ matplotlib
 ```bash
 # 1. Rebuild the profile table from raw logs (only needed if you add/replace a day)
 python scripts/build_profiles.py data/raw/*.xlsx
-
+ 
 # 2. Run the DP solver for one battery capacity                         [planned]
 python src/dp_solver.py --capacity 7 --data data/profiles_30min.csv
-
+ 
 # 3. Run the heuristic solver for one battery capacity                  [planned]
 python src/heuristic_solver.py --capacity 7 --data data/profiles_30min.csv
-
+ 
 # 4. Run the full comparison across the capacity sweep and all 5 days   [planned]
 python src/compare.py --capacities 0 2 4 7 --data data/profiles_30min.csv
 ```
 
 ## Methodology
 
-- **Exact method — Dynamic Programming.** State: (30-minute slot, discretized battery SoC level). Decision: charge/discharge amount per slot, bounded by rate limits and battery capacity, with round-trip efficiency applied on transition. Solved by backward induction, giving the provably optimal
-  schedule for a given day and battery capacity.
+- **Exact method — Dynamic Programming.** State: (30-minute slot, discretized battery SoC level in kWh). Decision: `a_t`, the battery energy on the house side per slot (positive = discharge, negative = charge, matching the logs), bounded by rate limits and the usable SoC range, with charge/discharge
+  efficiency applied on transition. Solved by backward induction, giving the provably optimal schedule for a given day and battery capacity.
+
+### Model assumptions
+
+| Item               | Rule                                                                                                                                 |
+|--------------------|--------------------------------------------------------------------------------------------------------------------------------------|
+| Usable capacity    | `0.2·C ≤ SoC_t ≤ C` (20% reserve; confirm against datasheet). C ∈ {0, 2, 4, 7} kWh                                                   |
+| Rate               | `−R_c·Δt ≤ a_t ≤ R_d·Δt`, Δt = 0.5 h (logs show ~2.2 kW charge / ~2.5 kW discharge)                                                  |
+| SoC transition     | discharge: `SoC − a_t/η_d`; charge: `SoC + \|a_t\|·η_c` (η values are parameters, not yet verified)                                  |
+| No export          | `a_t ≤ max(0, d_t − g_t)`; surplus solar beyond load + battery is curtailed at zero value                                            |
+| Grid import / cost | `grid_t = max(0, d_t − g_t − a_t)`; cost = `Σ price_t · grid_t` (a definition, not a constraint — the grid is an unlimited backstop) |
+| Grid charging      | allowed in the model; verify against the inverter's actual configuration                                                             |
+
 - **Heuristic — GA or SA.** A day's schedule encoded as a 48-length vector of charge/discharge decisions; fitness is total cost with a penalty for constraint violations. Validated against DP's known-optimal answer on small cases before being used where DP doesn't scale (e.g. a longer or stochastic
   horizon).
 - **Evaluation.** Solution quality (cost), runtime, and scalability, compared across the four battery-capacity scenarios and all five real days (20 runs total).
@@ -117,3 +128,4 @@ python src/compare.py --capacities 0 2 4 7 --data data/profiles_30min.csv
 ## References
 
 - CEB optional domestic Time-of-Use tariff, May 2026 revision.
+ 
