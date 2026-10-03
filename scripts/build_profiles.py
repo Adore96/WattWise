@@ -9,16 +9,18 @@ coarsest resolution that never splits a single time-step across two
 different tariff rates (hourly slots would: 05:00-06:00, 18:00-19:00 and
 22:00-23:00 would each mix two prices).
 
-Usage:
-    python build_profiles.py *.xlsx
+Usage (from the repo root):
+    python scripts/build_profiles.py data/raw/*.xlsx
     (or edit FILES below to point at your own day files)
 """
 import re
 import sys
+from pathlib import Path
 
 import pandas as pd
 
 DATE_RE = re.compile(r'(\d{4}-\d{2}-\d{2})')
+OUT_PATH = Path(__file__).resolve().parent.parent / 'data' / 'profiles_30min.csv'
 
 FILES = {
     # 'YYYY-MM-DD': 'path/to/that/day.xlsx'
@@ -72,8 +74,8 @@ def build_day_profile(day: str, path: str) -> pd.DataFrame:
 def main(files: dict[str, str]):
     frames = [build_day_profile(day, path) for day, path in files.items()]
     profiles = pd.concat(frames, ignore_index=True)
-    profiles.to_csv('profiles_30min.csv', index=False)
-    print(f'Wrote profiles_30min.csv: {len(profiles)} rows '
+    profiles.to_csv(OUT_PATH, index=False)
+    print(f'Wrote {OUT_PATH}: {len(profiles)} rows '
           f'({len(files)} days x 48 slots)')
     print(profiles.groupby('date')[['production_kWh', 'consumption_kWh']].sum().round(2))
 
@@ -85,7 +87,7 @@ def day_from_filename(path: str) -> str:
     date in it -- some exports from the monitoring app are named things
     like 'PlantsDetails-History.xlsx' and only carry the date on the sheet
     tab (we hit exactly this with the Sep 13 replacement file)."""
-    match = DATE_RE.search(path.split('/')[-1])
+    match = DATE_RE.search(Path(path).name)
     if match:
         return match.group(1)
 

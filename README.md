@@ -34,51 +34,47 @@ Five real days of household inverter/monitoring logs, 5-minute resolution, resam
 - **Source**: Kasun's own solar + battery system (Production, Consumption, Grid, Battery power, Battery SOC%). Not synthetic, not third-party.
 - **Days used**: Sep 10, 11, 13, 16, 17, 2026.
 - **Sign convention**: positive `Battery(kW)` = discharging, negative = charging (verified against the logs, not assumed).
-- **Known data notes**: Sep 12's original log had a ~3-hour gap during the production ramp and was dropped in favor of a re-logged Sep 13; Sep 11 is missing one 5-minute reading at 05:20 (interpolated, negligible). Full write-up of every data issue and fix is in the report's Data Description
+- **Known data notes**: Sep 12's original log had a ~3-hour gap (39 missing 5-minute rows) during the production ramp and was dropped in favor of a re-logged Sep 13; it is kept in `data/raw/excluded/` as evidence and is not picked up by the pipeline. Sep 11 is missing one 5-minute reading at 05:20 (interpolated, negligible). Full write-up of every data issue and fix is in the report's Data Description
   section.
-  Raw logs and the resampling step aren't checked in raw here for size/privacy — see `scripts/build_profiles.py` to regenerate `data/profiles_30min.csv` from your own `.xlsx` exports.
+  The five raw `.xlsx` logs are committed in `data/raw/`; run `scripts/build_profiles.py` to regenerate `data/profiles_30min.csv` from them (the output is reproduced exactly).
 
 ## Repository structure
 
 ```
 .
 ├── data/
-│   ├── raw/                    # source .xlsx logs, one per day (not all committed — see note above)
+│   ├── raw/                    # source .xlsx logs, one per day (5 days, committed)
+│   │   └── excluded/           # 2026-09-12.xlsx: faulty log (3 h gap), kept as evidence, not used
 │   └── profiles_30min.csv      # cleaned, resampled output: 5 days × 48 slots
 ├── scripts/
 │   └── build_profiles.py       # raw 5-min logs -> tariff-aligned 30-min profile table
 ├── src/
+│   ├── model.py                # shared problem definition: params, transition, schedule cost       [planned]
 │   ├── dp_solver.py            # exact method: backward-induction DP over discretized SoC          [planned]
 │   ├── heuristic_solver.py     # GA/SA over the 24h dispatch vector                                  [planned]
 │   └── compare.py              # runs both solvers across the capacity sweep, produces results       [planned]
-├── notebooks/                  # exploratory work, plots for the report                              [planned]
-├── report/
+├── tests/                      # pytest: DP hand example (expected cost 33 vs 106), edge cases       [planned]
+├── notebooks/                  # exploratory work, plots for the report (Bimsara's GA notebook goes here)
+├── report/                     #                                                                      [planned]
 │   ├── report.pdf
 │   └── code_appendix.txt
 ├── docs/
-│   └── task-board.md
+│   └── task-board.md           #                                                                      [planned]
 ├── requirements.txt
-├── members.txt
-├── submission.txt
+├── members.txt                 #                                                                      [planned]
+├── submission.txt              #                                                                      [planned]
 └── README.md
 ```
 
 ## Setup
 
 ```bash
-python -m venv venv
-source venv/bin/activate          # Windows: venv\Scripts\activate
+python -m venv .venv
+source .venv/bin/activate         # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-`requirements.txt` (adjust once the solvers are built — DP here is hand-rolled backward induction, so no solver library is required unless the heuristic implementation pulls one in):
-
-```
-pandas
-numpy
-openpyxl
-matplotlib
-```
+`requirements.txt` lists pandas, numpy, openpyxl (reads the `.xlsx` logs), matplotlib and pytest. DP here is hand-rolled backward induction, so no solver library is required; add to the file if the heuristic implementation pulls one in.
 
 ## Usage
 
