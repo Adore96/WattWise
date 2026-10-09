@@ -3,3 +3,6 @@ numpy
 openpyxl
 matplotlib
 pytest
+jupyter
+nbconvert
+ipykernel

@@ -43,26 +43,33 @@ Five real days of household inverter/monitoring logs, 5-minute resolution, resam
 ```
 .
 ├── data/
-│   ├── raw/                    # source .xlsx logs, one per day (5 days, committed)
-│   │   └── excluded/           # 2026-09-12.xlsx: faulty log (3 h gap), kept as evidence, not used
-│   └── profiles_30min.csv      # cleaned, resampled output: 5 days × 48 slots
+│   ├── raw/                          # source .xlsx logs, one per day (5 days, committed)
+│   │   └── excluded/                 # 2026-09-12.xlsx: faulty log (3 h gap), kept as evidence, not used
+│   └── profiles_30min.csv            # cleaned, resampled output: 5 days × 48 slots
 ├── scripts/
-│   └── build_profiles.py       # raw 5-min logs -> tariff-aligned 30-min profile table
+│   ├── build_profiles.py             # raw 5-min logs -> tariff-aligned 30-min profile table
+│   └── calibrate_eta.py              # fits battery efficiency + capacity to the logged SOC
 ├── src/
-│   ├── model.py                # shared problem definition: params, transition, schedule cost       [planned]
-│   ├── dp_solver.py            # exact method: backward-induction DP over discretized SoC          [planned]
-│   ├── heuristic_solver.py     # GA/SA over the 24h dispatch vector                                  [planned]
-│   └── compare.py              # runs both solvers across the capacity sweep, produces results       [planned]
-├── tests/                      # pytest: DP hand example (expected cost 33 vs 106), edge cases       [planned]
-├── notebooks/                  # exploratory work, plots for the report (Bimsara's GA notebook goes here)
-├── report/                     #                                                                      [planned]
+│   ├── model.py                      # shared problem: data, parameters, simulate() (bill + constraint check)
+│   ├── dp_solver.py                  # exact method: backward-induction DP over a discretised SoC grid
+│   ├── heuristic_solver.py           # heuristic: Genetic Algorithm (Bimsara)
+│   └── compare.py                    # DP vs GA experiments -> results/*.csv
+├── tests/
+│   └── test_dp_hand_example.py       # DP hand example (optimal 33 vs 106 doing nothing)
+├── notebooks/
+│   └── dp_solver.ipynb               # DP walkthrough, calibration, comparison plots
+├── heuristic_energy_optimization.ipynb  # GA walkthrough and experiments
+├── results/                          # experiment outputs (CSV) and machine spec
+├── figures/                          # plots for the report
+├── report/                           #                                                    [planned]
 │   ├── report.pdf
 │   └── code_appendix.txt
 ├── docs/
-│   └── task-board.md           #                                                                      [planned]
+│   └── task-board.md                 #                                                    [planned]
 ├── requirements.txt
-├── members.txt                 #                                                                      [planned]
-├── submission.txt              #                                                                      [planned]
+├── pytest.ini
+├── members.txt                       #                                                    [planned]
+├── submission.txt                    #                                                    [planned]
 └── README.md
 ```
 
@@ -74,28 +81,53 @@ source .venv/bin/activate         # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-`requirements.txt` lists pandas, numpy, openpyxl (reads the `.xlsx` logs), matplotlib and pytest. DP here is hand-rolled backward induction, so no solver library is required; add to the file if the heuristic implementation pulls one in.
+`requirements.txt` lists pandas, numpy, openpyxl (reads the `.xlsx` logs), matplotlib, pytest and the
+Jupyter pieces needed to run the notebooks. The DP is hand-rolled backward induction and the GA is
+hand-written, so no solver library is required.
 
 ## Usage
+
+All commands run from the repo root.
 
 ```bash
 # 1. Rebuild the profile table from raw logs (only needed if you add/replace a day)
 python scripts/build_profiles.py data/raw/*.xlsx
- 
-# 2. Run the DP solver for one battery capacity                         [planned]
-python src/dp_solver.py --capacity 7 --data data/profiles_30min.csv
- 
-# 3. Run the heuristic solver for one battery capacity                  [planned]
-python src/heuristic_solver.py --capacity 7 --data data/profiles_30min.csv
- 
-# 4. Run the full comparison across the capacity sweep and all 5 days   [planned]
-python src/compare.py --capacities 0 2 4 7 --data data/profiles_30min.csv
+
+# 2. Calibrate the battery efficiency from the raw logs
+python scripts/calibrate_eta.py data/raw/*.xlsx
+
+# 3. Tests (DP hand example)
+python -m pytest
+
+# 4. DP for one capacity (every day, or one --date); --delta sets the SoC grid step
+python src/dp_solver.py --capacity 7 [--date 2026-09-11] [--delta 0.001]
+
+# 5. GA for one capacity
+python src/heuristic_solver.py --capacity 7 [--date 2026-09-11] [--seed 1]
+
+# 6. Full comparison: capacity sweep, grid-step and horizon scalability, eta sensitivity (~15 min)
+python src/compare.py            # --quick for a 3-seed smoke test
 ```
 
 ## Methodology
 
-- **Exact method — Dynamic Programming.** State: (30-minute slot, discretized battery SoC level in kWh). Decision: `a_t`, the battery energy on the house side per slot (positive = discharge, negative = charge, matching the logs), bounded by rate limits and the usable SoC range, with charge/discharge
-  efficiency applied on transition. Solved by backward induction, giving the provably optimal schedule for a given day and battery capacity.
+- **Exact method — Dynamic Programming.** Stage: 30-minute slot. State: SoC level on a grid
+  `0.2·C, 0.2·C + δ, …, C`. Action: move `k` grid steps (next state always on the grid, so no rounding
+  or value-function interpolation); the house-side energy is backed out of the move
+  (`a = k·δ·η_d` discharging, `a = k·δ/η_c` charging). Solved by backward induction (`V_T = 0`), and the
+  schedule is recovered by a forward pass through the policy table. Exact for the discretised model;
+  δ = 0.001 kWh keeps the bill within ~1 % of the continuous optimum (see `notebooks/dp_solver.ipynb`).
+  Validated against a hand-solved example (`tests/`), and every DP schedule is replayed through the
+  shared `simulate()` to confirm it is feasible and costs what the DP claims.
+- **Heuristic — Genetic Algorithm.** One individual = the vector of `a_t` for every slot. Tournament
+  selection, blend crossover, Gaussian mutation, elitism; warm-started with a greedy rule. Per-slot
+  bounds (rate limits, no export) are enforced by clipping; the SoC limits, which couple slots, by a
+  graded penalty (`fitness = bill + 10^5 · violation`).
+- **Both methods import `src/model.py`**, so they optimise the same model and are scored by the same
+  `simulate()`.
+- **Evaluation.** Solution quality (gap to the DP), feasibility (rate over 10 GA seeds; DP replay check),
+  runtime (median of repeats, same machine) and scalability (SoC grid step, horizon of 1 / 2 / 5 chained
+  days), across 5 real days × 4 battery sizes.
 
 ### Model assumptions
 
@@ -103,22 +135,22 @@ python src/compare.py --capacities 0 2 4 7 --data data/profiles_30min.csv
 |--------------------|--------------------------------------------------------------------------------------------------------------------------------------|
 | Usable capacity    | `0.2·C ≤ SoC_t ≤ C` (20% reserve; confirm against datasheet). C ∈ {0, 2, 4, 7} kWh                                                   |
 | Rate               | `−R_c·Δt ≤ a_t ≤ R_d·Δt`, Δt = 0.5 h (logs show ~2.2 kW charge / ~2.5 kW discharge)                                                  |
-| SoC transition     | discharge: `SoC − a_t/η_d`; charge: `SoC + \|a_t\|·η_c` (η values are parameters, not yet verified)                                  |
+| SoC transition     | discharge: `SoC − a_t/η_d`; charge: `SoC + \|a_t\|·η_c`, η_c = η_d = 0.91 (round trip 0.83, fitted to the logs by `scripts/calibrate_eta.py`) |
 | No export          | `a_t ≤ max(0, d_t − g_t)`; surplus solar beyond load + battery is curtailed at zero value                                            |
 | Grid import / cost | `grid_t = max(0, d_t − g_t − a_t)`; cost = `Σ price_t · grid_t` (a definition, not a constraint — the grid is an unlimited backstop) |
 | Grid charging      | allowed in the model; verify against the inverter's actual configuration                                                             |
+| Start / end of day | every day starts at the reserve floor `0.2·C`; energy left at the end has no value (`V_T = 0`)                                       |
 
-- **Heuristic — GA or SA.** A day's schedule encoded as a 48-length vector of charge/discharge decisions; fitness is total cost with a penalty for constraint violations. Validated against DP's known-optimal answer on small cases before being used where DP doesn't scale (e.g. a longer or stochastic
-  horizon).
-- **Evaluation.** Solution quality (cost), runtime, and scalability, compared across the four battery-capacity scenarios and all five real days (20 runs total).
+RESULTS_PLACEHOLDER
 
 ## Status
 
 - [x] Problem formulation & scope
 - [x] Real data collected, cleaned, and resampled to 30-minute tariff-aligned slots
-- [ ] DP solver implemented & validated
-- [ ] Heuristic solver implemented & validated
-- [ ] Comparative evaluation (cost / runtime / scalability across the capacity sweep)
+- [x] DP solver implemented & validated (hand example, replay check)
+- [x] Heuristic solver implemented & validated
+- [x] Battery efficiency calibrated from the logs
+- [x] Comparative evaluation (cost / feasibility / runtime / scalability)
 - [ ] Report, code appendix, and video
 
 ## References
