@@ -1,0 +1,11 @@
+day,params,end_error_pct,max_abs_error_pct
+2026-09-10,fitted,0.53,6.95
+2026-09-10,placeholder,3.8,9.97
+2026-09-11,fitted,4.94,8.73
+2026-09-11,placeholder,6.58,11.54
+2026-09-13,fitted,3.7,3.95
+2026-09-13,placeholder,8.06,8.29
+2026-09-16,fitted,9.18,9.45
+2026-09-16,placeholder,10.76,11.01
+2026-09-17,fitted,5.26,8.78
+2026-09-17,placeholder,6.69,10.94

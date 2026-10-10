@@ -141,7 +141,24 @@ python src/compare.py            # --quick for a 3-seed smoke test
 | Grid charging      | allowed in the model; verify against the inverter's actual configuration                                                             |
 | Start / end of day | every day starts at the reserve floor `0.2·C`; energy left at the end has no value (`V_T = 0`)                                       |
 
-RESULTS_PLACEHOLDER
+## Results (summary)
+
+Means over the 5 real days. DP at δ = 0.001 kWh, η = 0.91, GA over 10 seeds (pop 100 × 200 generations).
+Full tables in `results/`, plots in `figures/`, walkthrough in `notebooks/dp_solver.ipynb`.
+
+| Battery | No battery | Greedy rule | GA (mean / best seed) | DP (exact) | DP saving | GA feasible | Runtime DP / GA |
+|---------|-----------:|------------:|----------------------:|-----------:|----------:|------------:|----------------:|
+| 2 kWh   | Rs 196.7   | Rs 103.4    | Rs 89.3 / 84.9        | Rs 76.8    | 61 %      | 100 %       | 0.9 s / 1.4 s   |
+| 4 kWh   | Rs 196.7   | Rs 93.3     | Rs 66.5 / 63.4        | Rs 56.9    | 71 %      | 100 %       | 1.5 s / 1.6 s   |
+| 7 kWh   | Rs 196.7   | Rs 93.3     | Rs 62.2 / 59.4        | Rs 54.8    | 72 %      | 100 %       | 2.2 s / 1.6 s   |
+
+- Every DP schedule is feasible on replay, and no GA run beat the DP. The GA's mean gap is 15–24 %.
+- **Grid step:** DP work grows as 1/δ². The bill converges roughly linearly in δ (Rs 59.6 at δ = 0.01,
+  Rs 54.8 at δ = 0.001).
+- **Horizon (1 → 2 → 5 chained days, 7 kWh):** the DP stays exact, with runtime growing linearly (1.9 → 9.8 s).
+  The GA's gap with the same budget grows 9 % → 118 % → 486 %.
+- **Start-at-floor assumption:** 5 chained days cost Rs 79, versus Rs 274 when each day is solved
+  independently from the 20 % floor. Carrying charge overnight is the biggest remaining saving.
 
 ## Status
 
