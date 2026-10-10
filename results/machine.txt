@@ -1,0 +1,6 @@
+Windows-11-10.0.26200-SP0
+Intel64 Family 6 Model 170 Stepping 4, GenuineIntel
+Python 3.14.0
+numpy 2.5.3, pandas 3.0.6
+GA seeds: 10, DP timing repeats: 5
+eta_c = eta_d = 0.91
