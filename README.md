@@ -1,16 +1,15 @@
 # Dispatch Duo — Battery Dispatch Optimization vs CEB Time-of-Use Tariffs
 
-Optimization Methods (MSc AI) group assignment. We optimize when a home battery should charge or discharge over the day to minimize the electricity bill under Sri Lanka's CEB Time-of-Use tariff, comparing an exact method (Dynamic Programming) against a heuristic (Genetic Algorithm / Simulated
-Annealing) across a sweep of battery sizes.
+Optimization Methods (MSc AI) group assignment. We optimize when a home battery should charge or discharge over the day to minimize the electricity bill under Sri Lanka's CEB Time-of-Use tariff, comparing an exact method (Dynamic Programming) against a heuristic (Genetic Algorithm) across a sweep of battery sizes.
 
 ## Team
 
 | Member  | Role                                                                |
 |---------|---------------------------------------------------------------------|
 | Kasun   | Data pipeline, DP (exact method) solver, results & discussion       |
-| Bimsara | Heuristic (GA/SA) solver, mathematical formulation, report sections |
+| Bimsara | Heuristic (GA) solver, mathematical formulation, report sections    |
 
-Split by module, not by task — see [`docs/task-board.md`](docs/task-board.md) (or the shared board link in `submission.txt`) for the full breakdown and week-by-week plan.
+Split by module, not by task.
 
 ## Problem summary
 
@@ -57,19 +56,13 @@ Five real days of household inverter/monitoring logs, 5-minute resolution, resam
 ├── tests/
 │   └── test_dp_hand_example.py       # DP hand example (optimal 33 vs 106 doing nothing)
 ├── notebooks/
-│   └── dp_solver.ipynb               # DP walkthrough, calibration, comparison plots
-├── heuristic_energy_optimization.ipynb  # GA walkthrough and experiments
+│   ├── dp_solver.ipynb               # DP walkthrough, calibration, comparison plots
+│   └── heuristic_energy_optimization.ipynb  # GA walkthrough and experiments
 ├── results/                          # experiment outputs (CSV) and machine spec
 ├── figures/                          # plots for the report
-├── report/                           #                                                    [planned]
-│   ├── report.pdf
-│   └── code_appendix.txt
-├── docs/
-│   └── task-board.md                 #                                                    [planned]
+├── Assignment.docx                   # assignment brief
 ├── requirements.txt
-├── pytest.ini
-├── members.txt                       #                                                    [planned]
-├── submission.txt                    #                                                    [planned]
+├── pytest.ini                        # pythonpath = src, so tests import the solvers directly
 └── README.md
 ```
 
@@ -107,6 +100,10 @@ python src/heuristic_solver.py --capacity 7 [--date 2026-09-11] [--seed 1]
 
 # 6. Full comparison: capacity sweep, grid-step and horizon scalability, eta sensitivity (~15 min)
 python src/compare.py            # --quick for a 3-seed smoke test
+python src/compare.py --only sweep horizon   # run a subset: sweep | delta | horizon | eta
+
+# 7. Notebooks (plots for the report)
+jupyter notebook notebooks/
 ```
 
 ## Methodology
@@ -144,6 +141,7 @@ python src/compare.py            # --quick for a 3-seed smoke test
 ## Results (summary)
 
 Means over the 5 real days. DP at δ = 0.001 kWh, η = 0.91, GA over 10 seeds (pop 100 × 200 generations).
+"DP saving" is `1 − mean DP bill / mean no-battery bill` (the average of the per-day savings is 64 / 71 / 71 %).
 Full tables in `results/`, plots in `figures/`, walkthrough in `notebooks/dp_solver.ipynb`.
 
 | Battery | No battery | Greedy rule | GA (mean / best seed) | DP (exact) | DP saving | GA feasible | Runtime DP / GA |
@@ -152,13 +150,29 @@ Full tables in `results/`, plots in `figures/`, walkthrough in `notebooks/dp_sol
 | 4 kWh   | Rs 196.7   | Rs 93.3     | Rs 66.5 / 63.4        | Rs 56.9    | 71 %      | 100 %       | 1.5 s / 1.6 s   |
 | 7 kWh   | Rs 196.7   | Rs 93.3     | Rs 62.2 / 59.4        | Rs 54.8    | 72 %      | 100 %       | 2.2 s / 1.6 s   |
 
-- Every DP schedule is feasible on replay, and no GA run beat the DP. The GA's mean gap is 15–24 %.
+- Every DP schedule is feasible on replay, and no GA run beat the DP. The GA's mean gap is 15–24 %,
+  and no GA run with a battery got within 1 % of the DP optimum.
 - **Grid step:** DP work grows as 1/δ². The bill converges roughly linearly in δ (Rs 59.6 at δ = 0.01,
   Rs 54.8 at δ = 0.001).
 - **Horizon (1 → 2 → 5 chained days, 7 kWh):** the DP stays exact, with runtime growing linearly (1.9 → 9.8 s).
   The GA's gap with the same budget grows 9 % → 118 % → 486 %.
 - **Start-at-floor assumption:** 5 chained days cost Rs 79, versus Rs 274 when each day is solved
   independently from the 20 % floor. Carrying charge overnight is the biggest remaining saving.
+
+## Outputs
+
+| File | Contents | Produced by |
+|------|----------|-------------|
+| `results/sweep_summary.csv` | per day × capacity: baseline, greedy, DP bill/runtime/replay check, GA best/mean/worst, gap, feasibility | `src/compare.py` |
+| `results/sweep_ga_runs.csv` | every GA run (day × capacity × seed) | `src/compare.py` |
+| `results/scaling_delta.csv` | DP bill, state count and runtime vs SoC grid step δ (C = 7) | `src/compare.py` |
+| `results/scaling_horizon.csv`, `scaling_horizon_ga_runs.csv` | 1 / 2 / 5 chained days: DP vs GA, plus independent-days DP bill | `src/compare.py` |
+| `results/eta_sensitivity.csv` | DP bill and saving for η ∈ {0.91, 0.95, 1.0} | `src/compare.py` |
+| `results/eta_calibration.csv`, `eta_replay_errors.csv` | fitted round-trip efficiency / capacity, SOC replay errors | `scripts/calibrate_eta.py` |
+| `results/machine.txt` | machine, library versions and run settings used for timing | `src/compare.py` |
+| `figures/eta_replay.png` | logged vs replayed SOC (fitted vs placeholder η) | `scripts/calibrate_eta.py` |
+| `figures/dp_*.png`, `horizon_scaling.png` | DP dispatch (Sep 11, 4 kWh), δ scaling, DP vs GA quality, horizon scaling | `notebooks/dp_solver.ipynb` |
+| `figures/ga_*.png` | GA convergence, GA dispatch (Sep 11, 4 kWh), GA savings vs battery size | `notebooks/heuristic_energy_optimization.ipynb` |
 
 ## Status
 
