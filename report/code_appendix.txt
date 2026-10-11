@@ -1,0 +1,1898 @@
+WattWise - Battery Dispatch Optimization vs CEB Time-of-Use Tariffs
+Optimization Methods group assignment - Code Appendix
+Repository: https://github.com/Adore96/WattWise
+Generated 2026-10-11 from commit 5462820
+
+Contents:
+  src/compare.py
+  src/dp_solver.py
+  src/heuristic_solver.py
+  src/model.py
+  scripts/build_code_appendix.py
+  scripts/build_profiles.py
+  scripts/calibrate_eta.py
+  scripts/make_report_figures.py
+  tests/test_dp_hand_example.py
+  requirements.txt
+  pytest.ini
+  notebooks/dp_solver.ipynb
+  notebooks/heuristic_energy_optimization.ipynb
+
+==============================================================================
+src/compare.py
+==============================================================================
+"""
+DP vs GA comparison: solution quality, feasibility, runtime and scalability.
+
+Experiments (all results written to results/*.csv):
+  1. sweep      5 days x capacities {0, 2, 4, 7} kWh.
+                DP: bill, replay feasibility, median runtime of repeats.
+                GA: N seeds -> best/mean/worst bill, feasible rate, gap to DP,
+                    median runtime, generations to get within 1 % of DP.
+  2. delta      DP scalability in the SoC grid step (all days, C = 7).
+  3. horizon    1 / 2 / 5 chained days (C = 7): DP vs GA as the horizon grows.
+  4. eta        DP sensitivity to the efficiency (0.91 calibrated, 0.95, 1.0).
+
+Timing: time.perf_counter around the solve only (data loading excluded),
+median over repeats / seeds, all on the same machine (results/machine.txt).
+
+Usage (from the repo root):
+    python src/compare.py               # full run (~15 min)
+    python src/compare.py --quick       # 3 seeds, fewer repeats (smoke test)
+"""
+import argparse
+import platform
+import statistics
+import time
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+import model
+from dp_solver import solve_dp
+from heuristic_solver import greedy_schedule, run_ga
+
+RESULTS = model.ROOT / "results"
+
+DELTAS = [0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001]
+HORIZONS = [1, 2, 5]
+ETAS = [0.91, 0.95, 1.0]
+SCALING_CAPACITY = 7
+
+
+def timed_dp(day, capacity, repeats, **kw):
+    """Solve repeatedly; return the last result and the median runtime."""
+    times = []
+    for _ in range(repeats):
+        res = solve_dp(day, capacity, **kw)
+        times.append(res["runtime_s"])
+    return res, statistics.median(times)
+
+
+def gens_to_within(history, target, tol=0.01):
+    """First generation (1-based) whose best fitness is within tol of target."""
+    for g, f in enumerate(history, start=1):
+        if f <= target * (1 + tol) + 1e-9:
+            return g
+    return np.nan
+
+
+def ga_runs(day, capacity, seeds, dp_bill, label):
+    rows = []
+    for s in seeds:
+        r = run_ga(day, capacity, seed=s)
+        rows.append({
+            **label, "seed": s, "bill": r["bill"], "feasible": bool(r["feasible"]),
+            "violation": r["violation"], "runtime_s": r["runtime_s"],
+            "gap_pct": 100 * (r["bill"] - dp_bill) / dp_bill if dp_bill > 0 else 0.0,
+            "gens_to_1pct": gens_to_within(r["history"], dp_bill),
+        })
+    return rows
+
+
+def summarise_ga(runs):
+    df = pd.DataFrame(runs)
+    feas = df[df["feasible"]]
+    return {
+        "ga_best": feas["bill"].min() if len(feas) else np.nan,
+        "ga_mean": feas["bill"].mean() if len(feas) else np.nan,
+        "ga_worst": feas["bill"].max() if len(feas) else np.nan,
+        "ga_feasible_rate": df["feasible"].mean(),
+        "ga_gap_best_pct": feas["gap_pct"].min() if len(feas) else np.nan,
+        "ga_gap_mean_pct": feas["gap_pct"].mean() if len(feas) else np.nan,
+        "ga_runtime_med_s": df["runtime_s"].median(),
+        "ga_gens_to_1pct_med": df["gens_to_1pct"].median(),
+        "ga_reached_1pct_rate": df["gens_to_1pct"].notna().mean(),
+    }
+
+
+def exp_sweep(df, seeds, repeats):
+    summary, all_runs = [], []
+    for date in model.list_days(df):
+        day = model.get_day(df, date)
+        base = model.baseline_bill(day)
+        for cap in model.CAPACITIES:
+            dp, dp_t = timed_dp(day, cap, repeats)
+            replay = model.simulate(dp["schedule"], day, cap)
+            greedy = model.simulate(greedy_schedule(day, cap), day, cap)
+            label = {"date": date, "capacity": cap}
+            runs = ga_runs(day, cap, seeds, dp["bill"], label)
+            all_runs += runs
+            row = {**label, "baseline": base, "greedy": greedy["bill"],
+                   "dp_bill": dp["bill"], "dp_replay_bill": replay["bill"],
+                   "dp_feasible": bool(replay["feasible"]), "dp_runtime_med_s": dp_t,
+                   "dp_states": dp["n_states"], "dp_moves": dp["n_moves"],
+                   "dp_saving_pct": 100 * (base - dp["bill"]) / base,
+                   **summarise_ga(runs)}
+            summary.append(row)
+            print(f"  sweep {date} C={cap}: base {base:7.2f}  DP {dp['bill']:7.2f} "
+                  f"({dp_t:.2f}s)  GA best {row['ga_best']:7.2f} mean {row['ga_mean']:7.2f} "
+                  f"feas {row['ga_feasible_rate']:.0%} ({row['ga_runtime_med_s']:.1f}s)")
+    return pd.DataFrame(summary), pd.DataFrame(all_runs)
+
+
+def exp_delta(df, repeats):
+    rows = []
+    for date in model.list_days(df):
+        day = model.get_day(df, date)
+        for d in DELTAS:
+            res, t = timed_dp(day, SCALING_CAPACITY, repeats, delta=d)
+            rows.append({"date": date, "capacity": SCALING_CAPACITY, "delta": d,
+                         "n_states": res["n_states"], "n_moves": res["n_moves"],
+                         "dp_bill": res["bill"], "runtime_med_s": t})
+        print(f"  delta {date}: done")
+    return pd.DataFrame(rows)
+
+
+def exp_horizon(df, seeds, repeats):
+    days = model.list_days(df)
+    rows, runs_all = [], []
+    for h in HORIZONS:
+        dates = days[:h]
+        hor = model.get_horizon(df, dates)
+        dp, dp_t = timed_dp(hor, SCALING_CAPACITY, repeats)
+        replay = model.simulate(dp["schedule"], hor, SCALING_CAPACITY)
+        # same days solved independently (each starting at the floor) for reference
+        indep = sum(solve_dp(model.get_day(df, d), SCALING_CAPACITY)["bill"] for d in dates)
+        label = {"horizon_days": h, "slots": len(hor["price"])}
+        runs = ga_runs(hor, SCALING_CAPACITY, seeds, dp["bill"], label)
+        runs_all += runs
+        rows.append({**label, "dates": " + ".join(dates), "capacity": SCALING_CAPACITY,
+                     "baseline": model.baseline_bill(hor), "dp_bill": dp["bill"],
+                     "dp_independent_days_bill": indep, "dp_feasible": bool(replay["feasible"]),
+                     "dp_runtime_med_s": dp_t, **summarise_ga(runs)})
+        print(f"  horizon {h} day(s): DP {dp['bill']:.2f} ({dp_t:.2f}s)  "
+              f"GA mean {rows[-1]['ga_mean']:.2f} ({rows[-1]['ga_runtime_med_s']:.1f}s)")
+    return pd.DataFrame(rows), pd.DataFrame(runs_all)
+
+
+def exp_eta(df):
+    rows = []
+    for date in model.list_days(df):
+        day = model.get_day(df, date)
+        base = model.baseline_bill(day)
+        for cap in [2, 4, 7]:
+            for eta in ETAS:
+                res = solve_dp(day, cap, eta_c=eta, eta_d=eta)
+                rows.append({"date": date, "capacity": cap, "eta": eta, "dp_bill": res["bill"],
+                             "saving_pct": 100 * (base - res["bill"]) / base})
+    print("  eta: done")
+    return pd.DataFrame(rows)
+
+
+def main():
+    p = argparse.ArgumentParser(description="DP vs GA comparison")
+    p.add_argument("--quick", action="store_true", help="3 GA seeds, 1 repeat")
+    p.add_argument("--only", nargs="*", choices=["sweep", "delta", "horizon", "eta"])
+    args = p.parse_args()
+
+    seeds = [1, 2, 3] if args.quick else list(range(1, 11))
+    repeats = 1 if args.quick else 5
+    todo = args.only or ["sweep", "delta", "horizon", "eta"]
+    RESULTS.mkdir(exist_ok=True)
+    df = model.load_profiles()
+
+    (RESULTS / "machine.txt").write_text(
+        f"{platform.platform()}\n{platform.processor()}\nPython {platform.python_version()}\n"
+        f"numpy {np.__version__}, pandas {pd.__version__}\n"
+        f"GA seeds: {len(seeds)}, DP timing repeats: {repeats}\n"
+        f"eta_c = eta_d = {model.ETA_C}\n", encoding="utf-8")
+
+    t0 = time.perf_counter()
+    if "sweep" in todo:
+        summary, runs = exp_sweep(df, seeds, repeats)
+        summary.to_csv(RESULTS / "sweep_summary.csv", index=False)
+        runs.to_csv(RESULTS / "sweep_ga_runs.csv", index=False)
+    if "delta" in todo:
+        exp_delta(df, min(repeats, 3)).to_csv(RESULTS / "scaling_delta.csv", index=False)
+    if "horizon" in todo:
+        hz, hz_runs = exp_horizon(df, seeds, min(repeats, 3))
+        hz.to_csv(RESULTS / "scaling_horizon.csv", index=False)
+        hz_runs.to_csv(RESULTS / "scaling_horizon_ga_runs.csv", index=False)
+    if "eta" in todo:
+        exp_eta(df).to_csv(RESULTS / "eta_sensitivity.csv", index=False)
+    print(f"done in {time.perf_counter() - t0:.0f} s -> {RESULTS}")
+
+
+if __name__ == "__main__":
+    main()
+
+==============================================================================
+src/dp_solver.py
+==============================================================================
+"""
+Exact method: Dynamic Programming (backward induction) for battery dispatch.
+
+Stage   t = slot (0 .. T-1)
+State   i = SoC grid level, SoC_i = soc_min + i * delta   (i = 0 .. N)
+Action  k = number of grid steps moved in the slot
+        k > 0 discharge k steps, k < 0 charge |k| steps, k = 0 hold
+        next state j = i - k, which is always ON the grid, so no rounding
+        or interpolation of the value function is needed.
+
+House-side energy of a move (from the settled transition equations):
+    discharge k steps:  a = k * delta * eta_d        (SoC falls by a / eta_d)
+    charge   |k| steps: a = k * delta / eta_c  (<0)  (SoC rises by |a| * eta_c)
+
+Bellman recursion (V_T = 0, leftover energy has no value):
+    V_t(i) = min_k [ price_t * max(0, d_t - g_t - a(k)) + V_{t+1}(i - k) ]
+over moves that respect the rate limits, the SoC range and no-export
+(a(k) <= max(0, d_t - g_t)).
+
+The result is exactly optimal for the discretised model; delta controls how
+closely that matches the continuous one.
+
+Usage:
+    python src/dp_solver.py --capacity 7 --date 2026-09-11 [--delta 0.001]
+"""
+import argparse
+import math
+import time
+
+import numpy as np
+
+import model
+
+EPS = 1e-12
+
+# Main-results grid step. The discretisation error is roughly linear in delta
+# (one partial discharge step of load per slot cannot be matched exactly):
+# on Sep 11 / 4 kWh the bill is 58.05 at 0.01, 54.63 at 0.005, 52.83 at 0.002
+# and 52.39 at 0.001 (~1 % above the extrapolated continuous optimum).
+DEFAULT_DELTA = 0.001
+
+
+def soc_grid(capacity, delta, reserve_frac=model.SOC_RESERVE_FRAC):
+    """SoC levels soc_min, soc_min + delta, ..., C."""
+    soc_min, soc_max = model.soc_bounds(capacity, reserve_frac)
+    span = (soc_max - soc_min) / delta
+    n = int(round(span))
+    if abs(span - n) > 1e-6:
+        raise ValueError(f"usable range {soc_max - soc_min} kWh is not a multiple of delta={delta}")
+    return soc_min + delta * np.arange(n + 1)
+
+
+def step_limits(delta, eta_c=model.ETA_C, eta_d=model.ETA_D,
+                max_charge=model.MAX_CHARGE_KWH, max_discharge=model.MAX_DISCHARGE_KWH):
+    """Rate limits (house side) as caps on the number of grid steps per slot.
+    Always round DOWN: rounding up would allow a move above the rate limit."""
+    k_charge = math.floor(max_charge * eta_c / delta + 1e-9)        # |a| = k*delta/eta_c <= max_charge
+    k_discharge = math.floor(max_discharge / (eta_d * delta) + 1e-9)  # a = k*delta*eta_d <= max_discharge
+    return k_charge, k_discharge
+
+
+def solve_dp(day, capacity, delta=None, eta_c=model.ETA_C, eta_d=model.ETA_D,
+             max_charge=model.MAX_CHARGE_KWH, max_discharge=model.MAX_DISCHARGE_KWH,
+             reserve_frac=model.SOC_RESERVE_FRAC, soc0=None):
+    """
+    Solve one horizon (any number of slots) exactly on the SoC grid.
+
+    Returns a dict with the optimal schedule (house-side a_t), its bill, the
+    SoC trajectory, the value table V[t, i], the policy table K[t, i] (optimal
+    move in steps) and the solve time in seconds.
+    """
+    t0 = time.perf_counter()
+    if delta is None:
+        delta = DEFAULT_DELTA
+    solar, demand, price = day["solar"], day["demand"], day["price"]
+    T = len(price)
+    net_load = np.maximum(0.0, demand - solar)
+
+    if capacity == 0:
+        levels = np.array([0.0])
+        k_charge = k_discharge = 0
+    else:
+        levels = soc_grid(capacity, delta, reserve_frac)
+        k_charge, k_discharge = step_limits(delta, eta_c, eta_d, max_charge, max_discharge)
+    n_states = len(levels)
+    k_charge = min(k_charge, n_states - 1)
+    k_discharge = min(k_discharge, n_states - 1)
+
+    # candidate moves, ordered by |k| so ties resolve to the smallest move (hold first)
+    moves = sorted(range(-k_charge, k_discharge + 1), key=lambda k: (abs(k), k))
+    a_of = {k: (k * delta * eta_d if k >= 0 else k * delta / eta_c) for k in moves}
+
+    V = np.zeros((T + 1, n_states))               # V[T] = 0: terminal value
+    K = np.zeros((T, n_states), dtype=np.int32)   # policy: best k at (t, i)
+    idx = np.arange(n_states)
+
+    for t in range(T - 1, -1, -1):                # backward induction
+        best = np.full(n_states, np.inf)
+        best_k = np.zeros(n_states, dtype=np.int32)
+        for k in moves:
+            a = a_of[k]
+            if a > net_load[t] + EPS:             # no export
+                continue
+            j = idx - k                            # next state for every i
+            ok = (j >= 0) & (j < n_states)        # stays inside [soc_min, C]
+            cost_now = price[t] * max(0.0, demand[t] - solar[t] - a)
+            q = np.full(n_states, np.inf)
+            q[ok] = cost_now + V[t + 1, j[ok]]
+            better = q < best - EPS
+            best[better] = q[better]
+            best_k[better] = k
+        V[t] = best
+        K[t] = best_k
+
+    # forward pass: follow the policy from the start state
+    soc_start = levels[0] if soc0 is None else soc0
+    i = int(np.argmin(np.abs(levels - soc_start)))
+    if abs(levels[i] - soc_start) > 1e-6:
+        raise ValueError(f"start SoC {soc_start} is not on the grid")
+    start_index = i
+    schedule = np.zeros(T)
+    soc_traj = np.zeros(T)
+    for t in range(T):
+        k = int(K[t, i])
+        schedule[t] = a_of[k]
+        i -= k
+        soc_traj[t] = levels[i]
+
+    runtime = time.perf_counter() - t0
+    bill = float(np.sum(price * model.grid_import(demand, solar, schedule)))
+    return {
+        "schedule": schedule,
+        "bill": bill,
+        "optimal_value": float(V[0, start_index]),
+        "soc": soc_traj,
+        "V": V,
+        "K": K,
+        "levels": levels,
+        "runtime_s": runtime,
+        "n_states": n_states,
+        "n_moves": len(moves),
+    }
+
+
+def main():
+    p = argparse.ArgumentParser(description="Exact DP battery dispatch for one day")
+    p.add_argument("--capacity", type=float, default=7)
+    p.add_argument("--date", default=None, help="YYYY-MM-DD (default: every day)")
+    p.add_argument("--delta", type=float, default=DEFAULT_DELTA, help="SoC grid step (kWh)")
+    p.add_argument("--data", default=str(model.DATA_PATH))
+    args = p.parse_args()
+
+    df = model.load_profiles(args.data)
+    dates = [args.date] if args.date else model.list_days(df)
+    for date in dates:
+        day = model.get_day(df, date)
+        res = solve_dp(day, args.capacity, delta=args.delta)
+        check = model.simulate(res["schedule"], day, args.capacity)
+        base = model.baseline_bill(day)
+        print(f"{date}  C={args.capacity:g} kWh  baseline Rs {base:7.2f}  "
+              f"DP Rs {res['bill']:7.2f}  saving {100 * (base - res['bill']) / base:5.1f}%  "
+              f"replay feasible={check['feasible']}  "
+              f"{res['n_states']} states x {res['n_moves']} moves  {res['runtime_s'] * 1000:.0f} ms")
+
+
+if __name__ == "__main__":
+    main()
+
+==============================================================================
+src/heuristic_solver.py
+==============================================================================
+"""
+Heuristic method: Genetic Algorithm for battery dispatch.
+
+Author of the algorithm: Bimsara (developed in heuristic_energy_optimization.ipynb).
+Moved here unchanged in logic so the notebook, the comparison script and the
+DP all share one model (model.py). Changes when moving:
+  - horizon length comes from the data (len(day["price"])) instead of a fixed
+    48, so the same GA runs on chained multi-day horizons;
+  - the greedy seed discharges only up to the NET load (demand - solar),
+    because no-export is now a constraint in the shared simulate();
+  - no-export is a per-slot upper bound on a_t, so it is handled exactly
+    like the rate limits already were: by clipping each gene to its bounds.
+    The penalty then only has to deal with the inter-slot SoC constraints.
+    (Penalty-only handling left ~97% of mutants infeasible and the GA
+    stalled near the greedy seed.)
+
+Encoding: one individual = a vector of a_t (kWh, house side) for every slot,
+positive = discharge, negative = charge.
+Fitness: bill + penalty * total constraint violation (graded penalty).
+
+Usage:
+    python src/heuristic_solver.py --capacity 7 --date 2026-09-11 [--seed 1]
+"""
+import argparse
+import time
+
+import numpy as np
+
+import model
+
+PENALTY = 100000.0  # constraint-violation penalty weight
+
+
+def fitness(schedule, day, capacity, penalty=PENALTY):
+    """fitness = bill + penalty * violation (feasible schedules keep their true bill)."""
+    res = model.simulate(schedule, day, capacity)
+    res["fitness"] = res["bill"] + penalty * res["violation"]
+    return res
+
+
+def greedy_schedule(day, capacity, eta_c=model.ETA_C, eta_d=model.ETA_D,
+                    max_charge=model.MAX_CHARGE_KWH, max_discharge=model.MAX_DISCHARGE_KWH,
+                    reserve_frac=model.SOC_RESERVE_FRAC):
+    """Feasible rule-based seed: charge from surplus solar, discharge at peak."""
+    n = len(day["price"])
+    s = np.zeros(n)
+    soc_min, soc_max = model.soc_bounds(capacity, reserve_frac)
+    soc = soc_min
+
+    for t in range(n):
+        surplus = day["solar"][t] - day["demand"][t]
+
+        if surplus > 0:  # charge from surplus
+            room = soc_max - soc
+            charge = min(surplus, max_charge, room / eta_c if eta_c > 0 else room)
+            charge = max(charge, 0.0)
+            s[t] = -charge
+            soc += eta_c * charge
+
+        elif day["price"][t] >= 100:  # discharge at peak, never beyond the net load
+            avail = soc - soc_min
+            discharge = min(-surplus, max_discharge, avail * eta_d)
+            discharge = max(discharge, 0.0)
+            s[t] = discharge
+            soc -= discharge / eta_d
+
+    return s
+
+
+def run_ga(day, capacity, pop_size=100, generations=200, cx_rate=0.8,
+           mut_rate=0.1, mut_sigma=0.2, tournament_k=3, elites=2, seed=0):
+    """Genetic Algorithm. Returns the best schedule, bill, feasibility, history and runtime."""
+    t0 = time.perf_counter()
+    rng = np.random.default_rng(seed)
+    n = len(day["price"])
+    # per-slot bounds: rate limits, and no-export caps discharge at the net load
+    net_load = np.maximum(0.0, day["demand"] - day["solar"])
+    lo = np.full(n, -model.MAX_CHARGE_KWH)
+    hi = np.minimum(model.MAX_DISCHARGE_KWH, net_load)
+
+    # initial population: mostly small-random, plus a greedy seed and a zero seed
+    pop = rng.normal(0, 0.3, size=(pop_size, n)).clip(lo, hi)
+    pop[0] = greedy_schedule(day, capacity)  # warm-start seed
+    pop[1] = 0.0                             # do-nothing seed (always feasible)
+    fits = np.array([fitness(ind, day, capacity)["fitness"] for ind in pop])
+    history = []
+
+    def tournament():
+        idx = rng.integers(0, pop_size, tournament_k)
+        return pop[idx[np.argmin(fits[idx])]]  # fittest of k random individuals
+
+    for g in range(generations):
+        order = np.argsort(fits)
+        next_pop = [pop[order[i]].copy() for i in range(elites)]  # keep best few
+
+        while len(next_pop) < pop_size:
+            p1, p2 = tournament(), tournament()
+
+            if rng.random() < cx_rate:
+                a = rng.random(n)
+                child = a * p1 + (1 - a) * p2  # blend (arithmetic) crossover
+            else:
+                child = p1.copy()
+
+            m = rng.random(n) < mut_rate       # Gaussian mutation
+            child[m] += rng.normal(0, mut_sigma, size=m.sum())
+            child = child.clip(lo, hi)         # clamp to rate limits and no-export
+            next_pop.append(child)
+
+        pop = np.array(next_pop)
+        fits = np.array([fitness(ind, day, capacity)["fitness"] for ind in pop])
+        history.append(fits.min())
+
+    best = pop[np.argmin(fits)]
+    res = fitness(best, day, capacity)
+
+    return {
+        "schedule": best,
+        "bill": res["bill"],
+        "feasible": res["feasible"],
+        "violation": res["violation"],
+        "fitness": res["fitness"],
+        "soc": res["soc"],
+        "history": history,
+        "runtime_s": time.perf_counter() - t0,
+    }
+
+
+def main():
+    p = argparse.ArgumentParser(description="GA battery dispatch for one day")
+    p.add_argument("--capacity", type=float, default=7)
+    p.add_argument("--date", default=None, help="YYYY-MM-DD (default: every day)")
+    p.add_argument("--seed", type=int, default=1)
+    p.add_argument("--data", default=str(model.DATA_PATH))
+    args = p.parse_args()
+
+    df = model.load_profiles(args.data)
+    dates = [args.date] if args.date else model.list_days(df)
+    for date in dates:
+        day = model.get_day(df, date)
+        res = run_ga(day, args.capacity, seed=args.seed)
+        base = model.baseline_bill(day)
+        print(f"{date}  C={args.capacity:g} kWh  baseline Rs {base:7.2f}  "
+              f"GA Rs {res['bill']:7.2f}  feasible={res['feasible']}  {res['runtime_s']:.1f} s")
+
+
+if __name__ == "__main__":
+    main()
+
+==============================================================================
+src/model.py
+==============================================================================
+"""
+Shared problem definition for WattWise: battery parameters, data loading and
+the schedule simulator / bill. Both the DP (dp_solver.py) and the GA
+(heuristic_solver.py) import this module, so the two methods optimise exactly
+the same model and are scored by exactly the same cost function.
+
+Sign convention (matches the inverter logs): a_t > 0 discharge, a_t < 0 charge.
+a_t is the battery energy on the HOUSE side in one slot (kWh).
+"""
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA_PATH = ROOT / "data" / "profiles_30min.csv"
+
+SLOTS_PER_DAY = 48          # 30-minute slots
+SLOT_HOURS = 0.5            # dt
+
+CAPACITIES = [0, 2, 4, 7]   # kWh, the capacity sweep
+
+SOC_RESERVE_FRAC = 0.2      # usable SoC range is [0.2*C, C]
+
+CHARGE_RATE_KW = 2.2        # R_c, observed in the logs
+DISCHARGE_RATE_KW = 2.5     # R_d, observed in the logs
+MAX_CHARGE_KWH = CHARGE_RATE_KW * SLOT_HOURS          # 1.10 kWh per slot (house side)
+MAX_DISCHARGE_KWH = DISCHARGE_RATE_KW * SLOT_HOURS    # 1.25 kWh per slot (house side)
+
+# Charge / discharge efficiency, calibrated from the 5-minute logs by
+# scripts/calibrate_eta.py: round trip eta_c*eta_d = 0.83, split symmetrically
+# (fitted 0.912, effective capacity 6.86 kWh). Was 0.95 as a placeholder.
+ETA_C = 0.91
+ETA_D = 0.91
+
+TOL = 1e-9                  # numerical tolerance for constraint checks
+
+
+# ---------------------------------------------------------------- data
+
+def load_profiles(path=DATA_PATH):
+    """Load the cleaned 30-minute profile table."""
+    return pd.read_csv(path)
+
+
+def list_days(df):
+    """All dates in the table, in order."""
+    return sorted(df["date"].unique())
+
+
+def get_day(df, date):
+    """One day as 48-element arrays: solar, demand, price (plus labels)."""
+    d = df[df["date"] == date].sort_values("slot_start").reset_index(drop=True)
+    if len(d) != SLOTS_PER_DAY:
+        raise ValueError(f"{date}: expected {SLOTS_PER_DAY} slots, got {len(d)}")
+    return {
+        "date": date,
+        "solar": d["production_kWh"].to_numpy(float),
+        "demand": d["consumption_kWh"].to_numpy(float),
+        "price": d["price_LKR_per_kWh"].to_numpy(float),
+        "band": d["band"].to_numpy(),
+        "slot": d["slot_start"].to_numpy(),
+    }
+
+
+def get_horizon(df, dates):
+    """Several days chained into one horizon (48 * len(dates) slots).
+    Used for the horizon-length scalability experiment."""
+    days = [get_day(df, d) for d in dates]
+    out = {"date": " + ".join(dates)}
+    for key in ("solar", "demand", "price", "band", "slot"):
+        out[key] = np.concatenate([d[key] for d in days])
+    return out
+
+
+# ---------------------------------------------------------------- model
+
+def soc_bounds(capacity, reserve_frac=SOC_RESERVE_FRAC):
+    """Usable SoC range (kWh)."""
+    return reserve_frac * capacity, float(capacity)
+
+
+def grid_import(demand, solar, a):
+    """Energy bought from the grid in a slot. A definition, not a constraint:
+    the grid is an unlimited backstop and nothing is ever exported."""
+    return np.maximum(0.0, demand - solar - a)
+
+
+def simulate(schedule, day, capacity, eta_c=ETA_C, eta_d=ETA_D,
+             max_charge=MAX_CHARGE_KWH, max_discharge=MAX_DISCHARGE_KWH,
+             reserve_frac=SOC_RESERVE_FRAC, soc0=None):
+    """
+    Replay a dispatch schedule through the battery model.
+
+    Returns bill (Rs), total constraint violation (kWh, 0 if legal),
+    feasible flag and the SoC trajectory (SoC at the END of each slot).
+
+    Constraints checked:
+      rate       -max_charge <= a_t <= max_discharge
+      no export  a_t <= max(0, d_t - g_t)
+      SoC        soc_min <= SoC_t <= C
+    The battery starts at soc0 (default: the reserve floor).
+    """
+    schedule = np.asarray(schedule, dtype=float)
+    solar, demand, price = day["solar"], day["demand"], day["price"]
+    n = len(price)
+    if len(schedule) != n:
+        raise ValueError(f"schedule has {len(schedule)} slots, day has {n}")
+
+    soc_min, soc_max = soc_bounds(capacity, reserve_frac)
+    soc = soc_min if soc0 is None else soc0
+    soc_traj = np.zeros(n)
+    bill = 0.0
+    violation = 0.0
+
+    for t in range(n):
+        a = schedule[t]
+
+        # rate limits (asymmetric)
+        if a > max_discharge:
+            violation += a - max_discharge
+        elif -a > max_charge:
+            violation += -a - max_charge
+
+        # no export: discharge only up to the net load
+        net_load = max(0.0, demand[t] - solar[t])
+        if a > net_load:
+            violation += a - net_load
+
+        # SoC transition with efficiency on both sides
+        if a >= 0:
+            soc = soc - a / eta_d
+        else:
+            soc = soc + eta_c * (-a)
+
+        if soc < soc_min:
+            violation += soc_min - soc
+        if soc > soc_max:
+            violation += soc - soc_max
+        soc_traj[t] = soc
+
+        bill += price[t] * max(0.0, demand[t] - solar[t] - a)
+
+    return {
+        "bill": bill,
+        "violation": violation,
+        "feasible": violation < TOL,
+        "soc": soc_traj,
+    }
+
+
+def baseline_bill(day):
+    """Bill with no battery at all (C = 0)."""
+    return float(np.sum(day["price"] * grid_import(day["demand"], day["solar"], 0.0)))
+
+==============================================================================
+scripts/build_code_appendix.py
+==============================================================================
+"""
+Builds the plain-text code appendix required by the submission:
+every Python source file plus the code cells of both notebooks, in one
+file with a header per file.
+
+Usage (from the repo root):
+    python scripts/build_code_appendix.py
+Writes report/code_appendix.txt
+"""
+import json
+import subprocess
+from datetime import date
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+OUT = ROOT / "report" / "code_appendix.txt"
+
+SOURCES = (
+    sorted((ROOT / "src").glob("*.py"))
+    + sorted((ROOT / "scripts").glob("*.py"))
+    + sorted((ROOT / "tests").glob("*.py"))
+    + [ROOT / "requirements.txt", ROOT / "pytest.ini"]
+)
+NOTEBOOKS = sorted((ROOT / "notebooks").glob("*.ipynb"))
+
+RULE = "=" * 78
+
+
+def header(title):
+    return f"\n{RULE}\n{title}\n{RULE}\n"
+
+
+def git_commit():
+    try:
+        return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT,
+                              capture_output=True, text=True, check=True).stdout.strip()
+    except Exception:
+        return "unknown"
+
+
+def notebook_code(path):
+    nb = json.loads(path.read_text(encoding="utf-8"))
+    parts = []
+    n = 0
+    for cell in nb.get("cells", []):
+        if cell.get("cell_type") != "code":
+            continue
+        src = "".join(cell.get("source", [])).rstrip()
+        if not src:
+            continue
+        n += 1
+        parts.append(f"# ---- cell {n} ----\n{src}\n")
+    return "\n".join(parts)
+
+
+def main():
+    OUT.parent.mkdir(exist_ok=True)
+    files = [p for p in SOURCES if p.exists()]
+    lines = [
+        "WattWise - Battery Dispatch Optimization vs CEB Time-of-Use Tariffs",
+        "Optimization Methods group assignment - Code Appendix",
+        "Repository: https://github.com/Adore96/WattWise",
+        f"Generated {date.today().isoformat()} from commit {git_commit()}",
+        "",
+        "Contents:",
+    ]
+    lines += [f"  {p.relative_to(ROOT).as_posix()}" for p in files + NOTEBOOKS]
+    text = "\n".join(lines) + "\n"
+
+    for p in files:
+        text += header(p.relative_to(ROOT).as_posix())
+        text += p.read_text(encoding="utf-8").rstrip() + "\n"
+    for p in NOTEBOOKS:
+        text += header(f"{p.relative_to(ROOT).as_posix()}  (code cells only)")
+        text += notebook_code(p)
+
+    OUT.write_text(text, encoding="utf-8")
+    print(f"wrote {OUT.relative_to(ROOT)}: {len(files) + len(NOTEBOOKS)} files, "
+          f"{text.count(chr(10))} lines")
+
+
+if __name__ == "__main__":
+    main()
+
+==============================================================================
+scripts/build_profiles.py
+==============================================================================
+"""
+Turns raw 5-minute inverter/battery logs (one .xlsx per day, exported from
+the monitoring app) into a clean 30-minute profile table ready for the
+DP / heuristic dispatch models.
+
+Why 30-minute slots: CEB's optional domestic Time-of-Use tariff switches
+at 05:30, 18:30 and 22:30 -- all half-hour marks. A 30-minute slot is the
+coarsest resolution that never splits a single time-step across two
+different tariff rates (hourly slots would: 05:00-06:00, 18:00-19:00 and
+22:00-23:00 would each mix two prices).
+
+Usage (from the repo root):
+    python scripts/build_profiles.py data/raw/*.xlsx
+    (or edit FILES below to point at your own day files)
+"""
+import re
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+DATE_RE = re.compile(r'(\d{4}-\d{2}-\d{2})')
+OUT_PATH = Path(__file__).resolve().parent.parent / 'data' / 'profiles_30min.csv'
+
+FILES = {
+    # 'YYYY-MM-DD': 'path/to/that/day.xlsx'
+}
+
+TARIFF_BANDS = [
+    (5.5, 18.5, 'Day', 47.0),
+    (18.5, 22.5, 'Peak', 106.0),
+    # anything else (22:30-05:30, wrapping past midnight) is Off-Peak
+]
+OFF_PEAK_PRICE = 33.0
+
+
+def tariff_band(hour_float: float):
+    for start, end, name, price in TARIFF_BANDS:
+        if start <= hour_float < end:
+            return name, price
+    return 'Off-Peak', OFF_PEAK_PRICE
+
+
+def build_day_profile(day: str, path: str) -> pd.DataFrame:
+    df = pd.read_excel(path)
+    df['t'] = pd.to_datetime(df['Time'])
+    df = df.drop_duplicates('t').set_index('t').sort_index().drop(columns=['Time'])
+
+    # reindex onto the complete 5-minute grid for the day and linearly
+    # interpolate any gaps (logger dropouts, wifi hiccups, etc.) -- flagged
+    # per-day so you know which days had a repair applied.
+    full_idx = pd.date_range(f'{day} 00:00:00', f'{day} 23:55:00', freq='5min')
+    n_missing = len(full_idx.difference(df.index))
+    df = df.reindex(full_idx).interpolate(method='time').ffill().bfill()
+
+    prod = df['Production（kW）'].resample('30min').mean()
+    cons = df['Consumption（kW）'].resample('30min').mean()
+    soc = df['SOC（%）'].resample('30min').last()
+
+    out = pd.DataFrame({
+        'date': day,
+        'slot_start': prod.index.strftime('%H:%M'),
+        'production_kWh': (prod * 0.5).round(3).values,
+        'consumption_kWh': (cons * 0.5).round(3).values,
+        'soc_pct_end': soc.round(1).values,
+    })
+    hour_float = prod.index.hour + prod.index.minute / 60
+    out[['band', 'price_LKR_per_kWh']] = [tariff_band(h) for h in hour_float]
+    out['gap_interpolated'] = n_missing > 0
+    out['n_missing_5min_rows'] = n_missing
+    return out
+
+
+def main(files: dict[str, str]):
+    frames = [build_day_profile(day, path) for day, path in files.items()]
+    profiles = pd.concat(frames, ignore_index=True)
+    profiles.to_csv(OUT_PATH, index=False)
+    print(f'Wrote {OUT_PATH}: {len(profiles)} rows '
+          f'({len(files)} days x 48 slots)')
+    print(profiles.groupby('date')[['production_kWh', 'consumption_kWh']].sum().round(2))
+
+
+def day_from_filename(path: str) -> str:
+    """Pull a YYYY-MM-DD date out of a file, regardless of any prefix the
+    export/upload process tacked on (e.g. '855e01ba-2026-09-10.xlsx').
+    Falls back to the workbook's sheet name if the filename itself has no
+    date in it -- some exports from the monitoring app are named things
+    like 'PlantsDetails-History.xlsx' and only carry the date on the sheet
+    tab (we hit exactly this with the Sep 13 replacement file)."""
+    match = DATE_RE.search(Path(path).name)
+    if match:
+        return match.group(1)
+
+    sheet_names = pd.ExcelFile(path).sheet_names
+    for name in sheet_names:
+        match = DATE_RE.search(str(name))
+        if match:
+            return match.group(1)
+
+    raise ValueError(
+        f"Can't find a YYYY-MM-DD date in the filename or sheet names of {path!r} "
+        f"(sheets: {sheet_names}). Either rename the file, or fill in FILES by hand."
+    )
+
+
+if __name__ == '__main__':
+    if len(sys.argv) > 1:
+        files = {day_from_filename(p): p for p in sys.argv[1:]}
+    else:
+        files = FILES
+    if not files:
+        print('No files given. Pass day files as args, or fill in FILES in the script.')
+        sys.exit(1)
+    main(files)
+
+==============================================================================
+scripts/calibrate_eta.py
+==============================================================================
+"""
+Sanity-check / calibrate the battery efficiency from the raw 5-minute logs.
+
+The logged Battery(kW) is measured on the house (AC) side, the same side as
+a_t in the model, and SOC(%) is the inverter's state of charge. Over any
+interval the model says
+
+    dSOC% = (100 / Cap) * ( eta_c * E_charge  -  E_discharge / eta_d )
+
+which is linear in E_charge and E_discharge:
+
+    dSOC% = b1 * E_charge - b2 * E_discharge,   b1 = 100 eta_c / Cap,
+                                                b2 = 100 / (Cap * eta_d)
+
+Least squares gives b1, b2. Only two quantities are identifiable from them:
+the round-trip efficiency eta_c * eta_d = b1 / b2 and Cap. Splitting the
+round trip symmetrically (eta_c = eta_d = eta) gives
+    eta = sqrt(b1 / b2),   Cap = 100 * eta / b1.
+
+SOC% is logged as an integer, so single 5-minute differences are mostly
+quantisation noise; we regress on 30-minute differences instead. Windows that
+touch >= 99% SOC are dropped: the BMS tapers/stops charging near full, which
+breaks the linear relation.
+
+A constant standby-drain term (regression intercept) was also tried: it
+pushes eta above 1, which is physically impossible. The battery is idle in
+only 1-8% of samples, so losses and a standby drain cannot be separated from
+these logs; the no-intercept fit lumps both into eta (conservative for the
+battery's value).
+
+Usage (from the repo root):
+    python scripts/calibrate_eta.py data/raw/*.xlsx
+"""
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+ROOT = Path(__file__).resolve().parent.parent
+RESULTS = ROOT / "results"
+FIGURES = ROOT / "figures"
+
+STEP_H = 5 / 60          # 5-minute samples
+WINDOW = 6               # 6 x 5 min = 30-minute differences
+PLAUSIBLE_ETA = (0.85, 0.99)
+PLAUSIBLE_CAP = (5.5, 8.5)  # kWh around the 7 kWh nameplate
+FULL_SOC_PCT = 99
+
+
+def load_log(path):
+    df = pd.read_excel(path)
+    df["t"] = pd.to_datetime(df["Time"])
+    df = df.drop_duplicates("t").set_index("t").sort_index()
+    batt = df[[c for c in df.columns if c.startswith("Battery")][0]].astype(float)
+    soc = df[[c for c in df.columns if c.startswith("SOC")][0]].astype(float)
+    return pd.DataFrame({"p": batt, "soc": soc})
+
+
+def interval_energy(p):
+    """Charge / discharge energy (kWh, house side) per 5-minute interval,
+    trapezoid rule applied separately to the positive and negative parts."""
+    dis = np.clip(p, 0, None)
+    ch = np.clip(-p, 0, None)
+    e_dis = (dis[:-1] + dis[1:]) / 2 * STEP_H
+    e_ch = (ch[:-1] + ch[1:]) / 2 * STEP_H
+    return e_ch, e_dis
+
+
+def windows(log):
+    """Non-overlapping 30-minute windows: (E_charge, E_discharge, dSOC%)."""
+    p, soc = log["p"].to_numpy(), log["soc"].to_numpy()
+    e_ch, e_dis = interval_energy(p)
+    rows = []
+    for s in range(0, len(p) - WINDOW, WINDOW):
+        # skip windows that span a logging gap
+        span = (log.index[s + WINDOW] - log.index[s]).total_seconds() / 60
+        if abs(span - WINDOW * 5) > 1e-6:
+            continue
+        if soc[s:s + WINDOW + 1].max() >= FULL_SOC_PCT:
+            continue
+        rows.append((e_ch[s:s + WINDOW].sum(), e_dis[s:s + WINDOW].sum(),
+                     soc[s + WINDOW] - soc[s]))
+    return np.array(rows)
+
+
+def fit(rows):
+    X = np.column_stack([rows[:, 0], -rows[:, 1]])
+    y = rows[:, 2]
+    (b1, b2), *_ = np.linalg.lstsq(X, y, rcond=None)
+    resid = y - X @ np.array([b1, b2])
+    round_trip = b1 / b2
+    eta = np.sqrt(round_trip)
+    cap = 100 * eta / b1
+    return {"b1": b1, "b2": b2, "round_trip": round_trip, "eta": eta, "cap_kWh": cap,
+            "rmse_pct": float(np.sqrt(np.mean(resid ** 2))), "n_windows": len(y)}
+
+
+def replay(log, eta, cap):
+    """Integrate the logged power through the model transition. SOC is
+    clamped at 100 % like the real BMS (charging power logged while the
+    battery is full is not stored)."""
+    e_ch, e_dis = interval_energy(log["p"].to_numpy())
+    soc = [log["soc"].iloc[0]]
+    for c, d in zip(e_ch, e_dis):
+        soc.append(min(100.0, soc[-1] + 100 / cap * (eta * c - d / eta)))
+    return np.array(soc)
+
+
+def main(paths):
+    logs = {Path(p).stem: load_log(p) for p in paths}
+    rows = np.vstack([windows(log) for log in logs.values()])
+    res = fit(rows)
+
+    print(f"30-min windows used: {res['n_windows']}")
+    print(f"round-trip efficiency eta_c*eta_d = {res['round_trip']:.3f}")
+    print(f"symmetric split eta = {res['eta']:.3f}   effective capacity = {res['cap_kWh']:.2f} kWh")
+    print(f"fit RMSE = {res['rmse_pct']:.2f} SOC-% per 30 min")
+
+    plausible = (PLAUSIBLE_ETA[0] <= res["eta"] <= PLAUSIBLE_ETA[1]
+                 and PLAUSIBLE_CAP[0] <= res["cap_kWh"] <= PLAUSIBLE_CAP[1])
+    print("plausible:", plausible)
+
+    # replay error with the fitted values vs the 0.95 / 7 kWh placeholders
+    per_day = []
+    for name, log in logs.items():
+        for label, eta, cap in [("fitted", res["eta"], res["cap_kWh"]), ("placeholder", 0.95, 7.0)]:
+            sim = replay(log, eta, cap)
+            err = sim - log["soc"].to_numpy()
+            per_day.append({"day": name, "params": label,
+                            "end_error_pct": round(float(err[-1]), 2),
+                            "max_abs_error_pct": round(float(np.abs(err).max()), 2)})
+    per_day = pd.DataFrame(per_day)
+    print(per_day.to_string(index=False))
+
+    RESULTS.mkdir(exist_ok=True)
+    pd.DataFrame([res | {"plausible": plausible}]).to_csv(RESULTS / "eta_calibration.csv", index=False)
+    per_day.to_csv(RESULTS / "eta_replay_errors.csv", index=False)
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    FIGURES.mkdir(exist_ok=True)
+    name = sorted(logs)[1]
+    log = logs[name]
+    fig, ax = plt.subplots(figsize=(9, 4))
+    ax.plot(log.index, log["soc"], color="#333", lw=1.6, label="logged SOC")
+    ax.plot(log.index, replay(log, res["eta"], res["cap_kWh"]), color="#1a7f5a", lw=1.2,
+            label=f"replay, fitted (eta={res['eta']:.3f}, C={res['cap_kWh']:.2f} kWh)")
+    ax.plot(log.index, replay(log, 0.95, 7.0), color="#c0562a", lw=1.2, ls="--",
+            label="replay, placeholder (eta=0.95, C=7 kWh)")
+    ax.set_ylabel("SOC (%)")
+    ax.set_title(f"Battery transition replay vs logged SOC ({name})")
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3)
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    fig.savefig(FIGURES / "eta_replay.png", dpi=150)
+    return res, plausible
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Pass the raw day files, e.g. data/raw/*.xlsx")
+        sys.exit(1)
+    main(sys.argv[1:])
+
+==============================================================================
+scripts/make_report_figures.py
+==============================================================================
+"""
+Conceptual figures for the report (system, tariff + day profile, DP stage
+grid, GA loop). Result plots stay in the notebooks; this script only draws
+the explanatory figures, in the same palette the notebooks use.
+
+Usage (from the repo root):
+    python scripts/make_report_figures.py
+Writes figures/report_*.png
+"""
+from pathlib import Path
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.patches import FancyBboxPatch, FancyArrowPatch, Rectangle
+import numpy as np
+import pandas as pd
+
+ROOT = Path(__file__).resolve().parent.parent
+FIG = ROOT / "figures"
+DATA = ROOT / "data" / "profiles_30min.csv"
+
+# ---- shared palette (same hex codes as notebooks/dp_solver.ipynb)
+DP = "#2d5c86"        # DP / SoC
+GA = "#1a7f5a"        # GA
+SOLAR = "#e0a400"     # solar, greedy
+LOAD = "#bbbbbb"      # load
+DISCH = "#c0562a"     # battery discharge
+CHARGE = "#2d8a5f"    # battery charge
+INK = "#333333"
+BAND_BG = {"Off-Peak": "#e8f1fb", "Day": "#fbf6e8", "Peak": "#fbe8e8"}
+BAND_FG = {"Off-Peak": "#6f9fd8", "Day": "#e0b84a", "Peak": "#d0605a"}
+RATE = {"Off-Peak": 33, "Day": 47, "Peak": 106}
+
+plt.rcParams.update({"font.size": 10, "axes.edgecolor": INK, "savefig.dpi": 200})
+
+
+def box(ax, xy, w, h, text, fc, ec=INK, fs=10, bold=False, tc=INK, lw=1.2, r=0.04):
+    x, y = xy
+    ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle=f"round,pad=0.01,rounding_size={r}",
+                                fc=fc, ec=ec, lw=lw))
+    ax.text(x + w / 2, y + h / 2, text, ha="center", va="center", fontsize=fs,
+            color=tc, fontweight="bold" if bold else "normal", linespacing=1.35)
+
+
+def arrow(ax, p, q, color=INK, lw=1.6, style="-|>", rad=0.0, ls="-"):
+    ax.add_patch(FancyArrowPatch(p, q, arrowstyle=style, mutation_scale=14, color=color,
+                                 lw=lw, linestyle=ls, connectionstyle=f"arc3,rad={rad}"))
+
+
+# ------------------------------------------------------------------ 1. system
+def system_diagram():
+    fig, ax = plt.subplots(figsize=(9, 4.6))
+    ax.set_xlim(0, 10); ax.set_ylim(0, 5.2); ax.axis("off")
+
+    box(ax, (0.2, 3.5), 2.4, 1.3, "Solar PV\n$g_t$ (kWh / slot)", "#fdf3d6", ec=SOLAR, bold=False)
+    box(ax, (0.2, 0.4), 2.4, 1.5, "Battery\nC ∈ {0, 2, 4, 7} kWh\n2.2 kW in / 2.5 kW out\nη = 0.91 each way",
+        "#e7f0f8", ec=DP, fs=9)
+    box(ax, (3.8, 1.9), 2.4, 1.5, "Hybrid inverter\n+ dispatch decision\n$a_t$ every 30 min",
+        "#ffffff", ec=INK, bold=True, lw=1.8)
+    box(ax, (7.4, 3.5), 2.4, 1.3, "House load\n$d_t$ (kWh / slot)", "#f1f1f1", ec="#888")
+    box(ax, (7.4, 0.4), 2.4, 1.5, "CEB grid\nToU tariff $p_t$\nimport only (no export)", "#fbe8e8", ec=BAND_FG["Peak"], fs=9)
+
+    arrow(ax, (2.6, 4.0), (3.9, 3.3), color=SOLAR, lw=2.2)
+    arrow(ax, (2.6, 1.35), (3.8, 2.25), color=CHARGE, lw=2.0, style="<|-|>")
+    arrow(ax, (6.2, 3.1), (7.4, 3.95), color=INK, lw=2.2)
+    arrow(ax, (7.4, 1.25), (6.2, 2.2), color=BAND_FG["Peak"], lw=2.2)
+
+    ax.text(2.95, 3.95, "solar", color=SOLAR, fontsize=9, rotation=-28)
+    ax.text(2.55, 2.0, "charge (−) /\ndischarge (+)", color=CHARGE, fontsize=8.5, ha="left")
+    ax.text(6.55, 3.75, "serve load", color=INK, fontsize=9, rotation=35)
+    ax.text(6.25, 0.95, "import\n$grid_t$ = max(0, $d_t − g_t − a_t$)", color=BAND_FG["Peak"],
+            fontsize=8.5, ha="center", va="center")
+
+    # tariff strip under the title
+    x0, wtot = 3.4, 3.2
+    segs = [("Off-Peak", 5.5), ("Day", 13), ("Peak", 4), ("Off-Peak", 1.5)]
+    ax.text(5.0, 5.05, "Goal: choose $a_t$ for all 48 slots to minimise  Σ $p_t$·$grid_t$",
+            ha="center", fontsize=10.5, fontweight="bold")
+    x = x0
+    for band, hrs in segs:
+        w = wtot * hrs / 24
+        ax.add_patch(Rectangle((x, 4.35), w, 0.3, fc=BAND_FG[band], ec="white", lw=0.8))
+        x += w
+    ax.text(x0 + wtot / 2, 4.2, "00:00 → 24:00   Rs 33 / 47 / 106 per kWh", ha="center", va="top", fontsize=8)
+
+    fig.tight_layout()
+    fig.savefig(FIG / "report_system_diagram.png", bbox_inches="tight")
+    plt.close(fig)
+
+
+# ------------------------------------------------------------------ 2. tariff + profile
+def tariff_profile(date="2026-09-11"):
+    df = pd.read_csv(DATA)
+    d = df[df["date"] == date].sort_values("slot_start").reset_index(drop=True)
+    x = np.arange(len(d))
+
+    fig, (a0, a1) = plt.subplots(2, 1, figsize=(9, 4.6), sharex=True,
+                                 gridspec_kw={"height_ratios": [1, 3.2], "hspace": 0.08})
+    # tariff step
+    for t, band in enumerate(d["band"]):
+        a0.add_patch(Rectangle((t - 0.5, 0), 1, RATE[band], fc=BAND_FG[band], ec="none"))
+    a0.set_ylim(0, 125); a0.set_ylabel("Rs/kWh")
+    a0.set_yticks([0, 50, 100])
+    for band, xc in [("Off-Peak", 5), ("Day", 23.5), ("Peak", 40.5)]:
+        a0.text(xc, RATE[band] + 4, f"{band}  Rs {RATE[band]}", ha="center", fontsize=8.5)
+    a0.spines[["top", "right"]].set_visible(False)
+
+    for t, band in enumerate(d["band"]):
+        a1.axvspan(t - 0.5, t + 0.5, color=BAND_BG[band], zorder=0, lw=0)
+    a1.bar(x, d["consumption_kWh"], color=LOAD, width=0.8, label="load $d_t$")
+    a1.plot(x, d["production_kWh"], color=SOLAR, lw=2, label="solar $g_t$")
+    net = np.maximum(0, d["consumption_kWh"] - d["production_kWh"])
+    a1.step(x, net, where="mid", color=INK, lw=1, ls="--", label="net load max(0, $d_t − g_t$)")
+    a1.set_ylabel("kWh per 30-min slot")
+    a1.set_xticks(range(0, 49, 6))
+    a1.set_xticklabels([f"{h:02d}:00" for h in range(0, 25, 3)])
+    a1.set_xlim(-0.5, 47.5)
+    a1.legend(loc="upper left", fontsize=8.5, frameon=False)
+    a1.spines[["top", "right"]].set_visible(False)
+    a1.set_xlabel(f"time of day ({date}, real household logs)")
+    fig.savefig(FIG / "report_tariff_profile.png", bbox_inches="tight")
+    plt.close(fig)
+
+
+# ------------------------------------------------------------------ 3. DP stage grid
+def dp_grid():
+    T, N = 9, 5                          # schematic: 9 stages, 5 SoC levels
+    bands = ["Off-Peak"] * 3 + ["Day"] * 3 + ["Peak"] * 3
+    path = [0, 1, 2, 3, 3, 3, 3, 2, 1, 0]  # SoC index before slot 0 .. after slot T-1
+
+    fig, ax = plt.subplots(figsize=(9, 4.4))
+    for t in range(T):
+        ax.add_patch(Rectangle((t + 0.5, -0.6), 1, N - 0.2 + 0.6, fc=BAND_BG[bands[t]], ec="none", zorder=0))
+        ax.text(t + 1, N - 0.45, f"{bands[t]}\nRs {RATE[bands[t]]}", ha="center", fontsize=7.5, color="#555")
+
+    # light edges: every feasible move from each state (|k| <= 1 here)
+    for t in range(T):
+        for i in range(N):
+            for k in (-1, 0, 1):
+                j = i + k
+                if 0 <= j < N:
+                    ax.plot([t + 0.5, t + 1.5], [i, j], color="#c9c9c9", lw=0.7, zorder=1)
+    # nodes
+    for t in range(T + 1):
+        ax.scatter([t + 0.5] * N, range(N), s=36, color="white", edgecolor="#777", zorder=3)
+    # optimal path
+    xs = [t + 0.5 for t in range(T + 1)]
+    ax.plot(xs, path, color=DP, lw=3, zorder=4)
+    ax.scatter(xs, path, s=60, color=DP, zorder=5)
+    for t in range(T):
+        k = path[t + 1] - path[t]
+        lab = "charge" if k > 0 else ("discharge" if k < 0 else "hold")
+        col = CHARGE if k > 0 else (DISCH if k < 0 else "#666")
+        ax.text(t + 1, -0.42, lab, ha="center", fontsize=7.5, color=col, fontweight="bold")
+
+    # backward-induction arrow
+    arrow(ax, (T + 0.4, -1.05), (0.6, -1.05), color=DISCH, lw=1.8)
+    ax.text((T + 1) / 2, -1.35, "backward pass: compute $V_t(s)$ from $t = T$ (where $V_T = 0$) down to $t = 0$",
+            ha="center", fontsize=8.5, color=DISCH)
+    arrow(ax, (0.6, -1.85), (T + 0.4, -1.85), color=DP, lw=1.8)
+    ax.text((T + 1) / 2, -2.15, "forward pass: follow the stored best move from the start state (reserve floor)",
+            ha="center", fontsize=8.5, color=DP)
+
+    ax.set_yticks(range(N))
+    ax.set_yticklabels(["0.2·C\n(floor)", "", "SoC levels\nstep δ", "", "C\n(full)"], fontsize=8)
+    ax.set_xticks([t + 0.5 for t in range(T + 1)])
+    ax.set_xticklabels([f"t={t}" for t in range(T)] + ["T"], fontsize=8)
+    ax.set_xlim(0.2, T + 0.8); ax.set_ylim(-2.4, N + 0.1)
+    ax.spines[["top", "right", "bottom"]].set_visible(False)
+    ax.set_title("$V_t(s) = \\min_k \\; [\\, p_t \\cdot \\max(0,\\, d_t - g_t - a(k)) + V_{t+1}(s - k\\delta) \\,]$",
+                 fontsize=11)
+    fig.savefig(FIG / "report_dp_stage_grid.png", bbox_inches="tight")
+    plt.close(fig)
+
+
+# ------------------------------------------------------------------ 4. GA loop
+def ga_loop():
+    fig, ax = plt.subplots(figsize=(9, 5.4))
+    ax.set_xlim(0, 10); ax.set_ylim(0, 6.2); ax.axis("off")
+
+    # chromosome strip
+    rng = np.random.default_rng(3)
+    genes = np.r_[np.zeros(10), -rng.uniform(0.1, 0.9, 6), rng.uniform(0, 0.3, 4) * 0,
+                  -rng.uniform(0.05, 0.4, 12), rng.uniform(0.1, 0.5, 4), rng.uniform(0.05, 0.12, 8),
+                  np.zeros(4)][:48]
+    x0, w = 0.6, 8.8 / 48
+    for t, g in enumerate(genes):
+        c = CHARGE if g < 0 else (DISCH if g > 0 else "#e6e6e6")
+        ax.add_patch(Rectangle((x0 + t * w, 5.35), w * 0.92, 0.45, fc=c, ec="none"))
+    ax.text(5, 6.0, "One individual = a full-day schedule: 48 genes $a_0 … a_{47}$ (kWh, house side)",
+            ha="center", fontsize=9.5, fontweight="bold")
+    ax.text(x0, 5.2, "green = charge (−)   orange = discharge (+)   grey = hold", fontsize=8, va="top", color="#555")
+
+    bw, bh = 2.6, 0.95
+    nodes = {
+        "init": (0.3, 3.55, "1. Initial population (100)\nrandom + greedy seed\n+ do-nothing seed", "#eef6f1"),
+        "eval": (3.7, 3.55, "2. Evaluate fitness\nbill + 10⁵ × violation\n(shared simulate())", "#ffffff"),
+        "sel":  (7.1, 3.55, "3. Tournament\nselection (k = 3)", "#eef6f1"),
+        "cx":   (7.1, 1.85, "4. Blend crossover\n(rate 0.8)", "#eef6f1"),
+        "mut":  (3.7, 1.85, "5. Gaussian mutation\n(rate 0.1, σ = 0.2)\n+ clip genes to bounds", "#eef6f1"),
+        "elite": (0.3, 1.85, "6. Elitism: carry best 2\n→ next generation", "#eef6f1"),
+    }
+    for key, (x, y, txt, fc) in nodes.items():
+        box(ax, (x, y), bw, bh, txt, fc, ec=GA, fs=8.4, bold=(key == "eval"))
+
+    def mid(key, side):
+        x, y, *_ = nodes[key]
+        return {"r": (x + bw, y + bh / 2), "l": (x, y + bh / 2), "t": (x + bw / 2, y + bh),
+                "b": (x + bw / 2, y)}[side]
+
+    arrow(ax, mid("init", "r"), mid("eval", "l"), color=GA)
+    arrow(ax, mid("eval", "r"), mid("sel", "l"), color=GA)
+    arrow(ax, mid("sel", "b"), mid("cx", "t"), color=GA)
+    arrow(ax, mid("cx", "l"), mid("mut", "r"), color=GA)
+    arrow(ax, mid("mut", "l"), mid("elite", "r"), color=GA)
+    arrow(ax, (2.9, 2.8), (3.7, 3.55), color=GA, lw=2.0)
+    ax.text(3.0, 3.3, "repeat", color=GA, fontsize=8.5, rotation=43, ha="center")
+    box(ax, (3.7, 0.2), bw, bh, "Stop after 200 generations\n→ best schedule\n(replayed by simulate())",
+        "#e7f0f8", ec=DP, fs=8.4)
+    arrow(ax, mid("elite", "b"), (3.7, 0.2 + bh / 2), color=DP, ls=":", rad=0.3)
+
+    fig.savefig(FIG / "report_ga_loop.png", bbox_inches="tight")
+    plt.close(fig)
+
+
+def main():
+    FIG.mkdir(exist_ok=True)
+    system_diagram()
+    tariff_profile()
+    dp_grid()
+    ga_loop()
+    print("wrote figures/report_{system_diagram,tariff_profile,dp_stage_grid,ga_loop}.png")
+
+
+if __name__ == "__main__":
+    main()
+
+==============================================================================
+tests/test_dp_hand_example.py
+==============================================================================
+"""
+Hand example from the DP walkthrough: 1-unit battery, 3 slots
+(off-peak 33, day 47, peak 106), 1 kWh load in the peak slot only,
+no solar, eta = 1, no reserve, start empty.
+
+Do nothing: buy 1 kWh at peak = 106.  Optimal: charge off-peak, hold,
+discharge at peak = 33.
+"""
+import numpy as np
+import pytest
+
+from dp_solver import solve_dp
+import model
+
+HAND_DAY = {
+    "solar": np.array([0.0, 0.0, 0.0]),
+    "demand": np.array([0.0, 0.0, 1.0]),
+    "price": np.array([33.0, 47.0, 106.0]),
+}
+HAND_PARAMS = dict(eta_c=1.0, eta_d=1.0, max_charge=1.0, max_discharge=1.0, reserve_frac=0.0)
+
+
+def test_do_nothing_costs_106():
+    assert model.baseline_bill(HAND_DAY) == pytest.approx(106.0)
+
+
+def test_value_and_policy_tables_delta_1():
+    res = solve_dp(HAND_DAY, capacity=1, delta=1.0, **HAND_PARAMS)
+    # V[t] = [V_t(s=0), V_t(s=1)], computed by hand (t = 0 is slot 1)
+    assert np.allclose(res["V"], [[33, 0], [47, 0], [106, 0], [0, 0]])
+    # policy in steps: -1 charge, 0 hold, +1 discharge
+    assert res["K"][0, 0] == -1   # slot 1, empty: charge at 33
+    assert res["K"][1, 0] == -1   # slot 2, empty: charge at 47 beats buying at 106
+    assert res["K"][1, 1] == 0    # slot 2, full: hold
+    assert res["K"][2, 0] == 0    # slot 3, empty: nothing to discharge, buy
+    assert res["K"][2, 1] == 1    # slot 3, full: discharge
+    assert np.allclose(res["schedule"], [-1, 0, 1])
+    assert res["bill"] == pytest.approx(33.0)
+
+
+def test_finer_grid_delta_half_same_optimum():
+    res = solve_dp(HAND_DAY, capacity=1, delta=0.5, **HAND_PARAMS)
+    assert res["bill"] == pytest.approx(33.0)
+    assert res["optimal_value"] == pytest.approx(33.0)
+    assert np.allclose(res["schedule"], [-1, 0, 1])
+
+
+def test_replay_matches_and_is_feasible():
+    res = solve_dp(HAND_DAY, capacity=1, delta=0.5, **HAND_PARAMS)
+    sim = model.simulate(res["schedule"], HAND_DAY, 1, **HAND_PARAMS)
+    assert sim["feasible"]
+    assert sim["bill"] == pytest.approx(res["bill"])
+
+==============================================================================
+requirements.txt
+==============================================================================
+pandas
+numpy
+openpyxl
+matplotlib
+pytest
+jupyter
+nbconvert
+ipykernel
+
+==============================================================================
+pytest.ini
+==============================================================================
+[pytest]
+pythonpath = src
+testpaths = tests
+
+==============================================================================
+notebooks/dp_solver.ipynb  (code cells only)
+==============================================================================
+# ---- cell 1 ----
+import sys
+from pathlib import Path
+
+ROOT = Path.cwd().parent if Path.cwd().name == "notebooks" else Path.cwd()
+sys.path.insert(0, str(ROOT / "src"))
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+import model
+from dp_solver import solve_dp, step_limits, DEFAULT_DELTA
+
+RESULTS, FIGURES = ROOT / "results", ROOT / "figures"
+FIGURES.mkdir(exist_ok=True)
+df = model.load_profiles()
+print("days:", model.list_days(df))
+print(f"eta_c = eta_d = {model.ETA_C}, reserve = {model.SOC_RESERVE_FRAC}, "
+      f"rate <= {model.MAX_CHARGE_KWH} / {model.MAX_DISCHARGE_KWH} kWh per slot, DP grid step = {DEFAULT_DELTA} kWh")
+
+# ---- cell 2 ----
+hand = {"solar": np.zeros(3), "demand": np.array([0, 0, 1.0]), "price": np.array([33, 47, 106.0])}
+hand_params = dict(eta_c=1.0, eta_d=1.0, max_charge=1.0, max_discharge=1.0, reserve_frac=0.0)
+
+for delta in (1.0, 0.5):
+    r = solve_dp(hand, capacity=1, delta=delta, **hand_params)
+    print(f"delta = {delta}:  optimal bill = {r['bill']:.0f}  schedule = {r['schedule']}  (do nothing = {model.baseline_bill(hand):.0f})")
+
+r = solve_dp(hand, capacity=1, delta=1.0, **hand_params)
+print("\nValue table V_t(s):")
+print(pd.DataFrame(r["V"], index=["t=1 off-peak", "t=2 day", "t=3 peak", "end"], columns=["s=0", "s=1"]))
+print("\nPolicy (steps: -1 charge, 0 hold, +1 discharge):")
+print(pd.DataFrame(r["K"], index=["t=1", "t=2", "t=3"], columns=["s=0", "s=1"]))
+
+# ---- cell 3 ----
+for eta in (0.95, model.ETA_C):
+    for d in (0.01, DEFAULT_DELTA):
+        kc, kd = step_limits(d, eta_c=eta, eta_d=eta)
+        print(f"eta={eta}, delta={d}: charge <= {kc} steps ({kc*d/eta:.4f} kWh), "
+              f"discharge <= {kd} steps ({kd*d*eta:.4f} kWh)")
+
+# ---- cell 4 ----
+day = model.get_day(df, "2026-09-11")
+cap = 4
+res = solve_dp(day, cap)
+check = model.simulate(res["schedule"], day, cap)
+base = model.baseline_bill(day)
+print(f"no battery: Rs {base:.2f}   DP optimum: Rs {res['bill']:.2f}   saving {100*(base-res['bill'])/base:.1f}%")
+print(f"replay through the shared simulate(): bill Rs {check['bill']:.2f}, violation {check['violation']:.2e}, feasible = {check['feasible']}")
+print(f"{res['n_states']} states x {res['n_moves']} moves x 48 slots, solved in {res['runtime_s']:.2f} s")
+
+x = np.arange(48)
+fig, ax1 = plt.subplots(figsize=(10, 4.2))
+for t0, t1, c in [(0, 11, "#e8f1fb"), (11, 37, "#fbf6e8"), (37, 45, "#fbe8e8"), (45, 48, "#e8f1fb")]:
+    ax1.axvspan(t0 - 0.5, t1 - 0.5, color=c, zorder=0)
+ax1.bar(x, day["demand"], color="#bbb", width=0.8, label="load")
+ax1.plot(x, day["solar"], color="#e0a400", lw=1.6, label="solar")
+ax1.bar(x, res["schedule"], color=["#2d8a5f" if a < 0 else "#c0562a" for a in res["schedule"]],
+        width=0.5, label="battery a_t (+ discharge / - charge)")
+ax1.axhline(0, color="#333", lw=0.6)
+ax1.set_xlabel("slot (0 = 00:00, 47 = 23:30); background: off-peak / day / peak")
+ax1.set_ylabel("kWh per slot")
+ax2 = ax1.twinx()
+ax2.plot(x, res["soc"], color="#2d5c86", lw=2, label="SoC (kWh)")
+ax2.set_ylabel("SoC (kWh)", color="#2d5c86")
+ax2.set_ylim(0, cap * 1.05)
+h1, l1 = ax1.get_legend_handles_labels(); h2, l2 = ax2.get_legend_handles_labels()
+ax1.legend(h1 + h2, l1 + l2, fontsize=8, loc="upper left")
+ax1.set_title("DP optimal dispatch, Sep 11, 4 kWh")
+fig.tight_layout(); fig.savefig(FIGURES / "dp_dispatch_sep11_4kwh.png", dpi=150); plt.show()
+
+grid = model.grid_import(day["demand"], day["solar"], res["schedule"])
+print("remaining grid cost by band:")
+print(pd.Series(day["price"] * grid).groupby(day["band"]).sum().round(2).to_string())
+
+# ---- cell 5 ----
+print(pd.read_csv(RESULTS / "eta_calibration.csv").round(3).T.to_string(header=False))
+print()
+print(pd.read_csv(RESULTS / "eta_replay_errors.csv").to_string(index=False))
+
+# ---- cell 6 ----
+from IPython.display import Image
+Image(filename=str(FIGURES / "eta_replay.png"))
+
+# ---- cell 7 ----
+dl = pd.read_csv(RESULTS / "scaling_delta.csv")
+g = dl.groupby("delta").agg(states=("n_states", "first"), moves=("n_moves", "first"),
+                            mean_bill=("dp_bill", "mean"), runtime_s=("runtime_med_s", "mean")).sort_index(ascending=False)
+print(g.round(3).to_string())
+
+fig, (a1, a2) = plt.subplots(1, 2, figsize=(10, 3.8))
+a1.plot(g.index, g["mean_bill"], "o-", color="#2d5c86"); a1.set_xscale("log"); a1.invert_xaxis()
+a1.set_xlabel("grid step delta (kWh)"); a1.set_ylabel("mean DP bill over 5 days (Rs)"); a1.set_title("accuracy")
+a2.loglog(g.index, g["runtime_s"], "o-", color="#c0562a"); a2.invert_xaxis()
+a2.set_xlabel("grid step delta (kWh)"); a2.set_ylabel("DP runtime per day (s)"); a2.set_title("runtime (C = 7 kWh)")
+for a in (a1, a2): a.grid(alpha=0.3, which="both")
+fig.tight_layout(); fig.savefig(FIGURES / "dp_delta_scaling.png", dpi=150); plt.show()
+
+# ---- cell 8 ----
+sw = pd.read_csv(RESULTS / "sweep_summary.csv")
+cols = ["date", "capacity", "baseline", "greedy", "dp_bill", "ga_best", "ga_mean", "ga_worst",
+        "ga_feasible_rate", "ga_gap_mean_pct", "dp_runtime_med_s", "ga_runtime_med_s", "dp_feasible"]
+print(sw[cols].round(2).to_string(index=False))
+print("\nAll DP schedules feasible on replay:", bool(sw["dp_feasible"].all()))
+
+# ---- cell 9 ----
+by_c = sw.groupby("capacity").agg(baseline=("baseline", "mean"), greedy=("greedy", "mean"),
+                                  dp=("dp_bill", "mean"), ga_mean=("ga_mean", "mean"), ga_best=("ga_best", "mean"),
+                                  ga_gap_mean_pct=("ga_gap_mean_pct", "mean"), ga_feasible=("ga_feasible_rate", "mean"),
+                                  dp_s=("dp_runtime_med_s", "mean"), ga_s=("ga_runtime_med_s", "mean"),
+                                  ga_gens_to_1pct=("ga_gens_to_1pct_med", "median"))
+by_c["dp_saving_pct"] = 100 * (by_c["baseline"] - by_c["dp"]) / by_c["baseline"]
+print(by_c.round(2).to_string())
+
+fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 4))
+a1.plot(by_c.index, by_c["baseline"], "s--", color="#999", label="no battery")
+a1.plot(by_c.index, by_c["greedy"], "^-", color="#e0a400", label="greedy rule")
+a1.plot(by_c.index, by_c["ga_mean"], "o-", color="#1a7f5a", label="GA (mean of seeds)")
+a1.plot(by_c.index, by_c["dp"], "D-", color="#2d5c86", label="DP (exact)")
+a1.set_xlabel("battery capacity (kWh)"); a1.set_ylabel("mean daily bill (Rs)"); a1.legend(fontsize=8)
+a1.set_title("bill vs battery size"); a1.grid(alpha=0.3)
+runs = pd.read_csv(RESULTS / "sweep_ga_runs.csv")
+runs = runs[runs["capacity"] > 0]
+data = [runs[runs["capacity"] == c]["gap_pct"] for c in sorted(runs["capacity"].unique())]
+a2.boxplot(data, tick_labels=[f"{c:g} kWh" for c in sorted(runs["capacity"].unique())])
+a2.axhline(0, color="#2d5c86", lw=1)
+a2.set_ylabel("GA gap to DP (%)"); a2.set_title("GA solution quality (all days x seeds)"); a2.grid(alpha=0.3)
+fig.tight_layout(); fig.savefig(FIGURES / "dp_vs_ga_quality.png", dpi=150); plt.show()
+
+# ---- cell 10 ----
+hz = pd.read_csv(RESULTS / "scaling_horizon.csv")
+print(hz[["horizon_days", "slots", "baseline", "dp_bill", "dp_independent_days_bill", "ga_best", "ga_mean",
+          "ga_feasible_rate", "ga_gap_mean_pct", "dp_runtime_med_s", "ga_runtime_med_s"]].round(2).to_string(index=False))
+
+fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 4))
+a1.plot(hz["slots"], hz["dp_runtime_med_s"], "D-", color="#2d5c86", label="DP")
+a1.plot(hz["slots"], hz["ga_runtime_med_s"], "o-", color="#1a7f5a", label="GA (200 generations)")
+a1.set_xlabel("horizon (slots)"); a1.set_ylabel("runtime (s)"); a1.legend(); a1.grid(alpha=0.3); a1.set_title("runtime")
+a2.plot(hz["slots"], hz["ga_gap_mean_pct"], "o-", color="#1a7f5a")
+a2.set_xlabel("horizon (slots)"); a2.set_ylabel("GA mean gap to DP (%)"); a2.grid(alpha=0.3); a2.set_title("GA quality")
+fig.tight_layout(); fig.savefig(FIGURES / "horizon_scaling.png", dpi=150); plt.show()
+
+# ---- cell 11 ----
+es = pd.read_csv(RESULTS / "eta_sensitivity.csv")
+print(es.pivot_table(index="capacity", columns="eta", values="saving_pct", aggfunc="mean").round(1).to_string())
+
+==============================================================================
+notebooks/heuristic_energy_optimization.ipynb  (code cells only)
+==============================================================================
+# ---- cell 1 ----
+# import necessary libraries
+import sys
+import inspect
+from pathlib import Path
+
+ROOT = Path.cwd().parent if Path.cwd().name == "notebooks" else Path.cwd()
+sys.path.insert(0, str(ROOT / "src"))
+
+import numpy as np
+import pandas as pd
+
+sys.path.insert(0, str(Path("src").resolve()))  # run from the repo root
+
+# ---- cell 2 ----
+# Data loading is shared with the DP: src/model.py
+from model import DATA_PATH, SLOTS_PER_DAY, SLOT_HOURS, load_profiles, list_days, get_day
+
+print(inspect.getsource(get_day))
+
+# ---- cell 3 ----
+# sanity check
+df = load_profiles()
+print("Days available:", list_days(df))
+
+day = get_day(df, "2026-09-11")
+print(f"\nLoaded {day['date']}")
+print(f"  slots       : {len(day['solar'])}")
+print(f"  total solar : {day['solar'].sum():.2f} kWh")
+print(f"  total demand: {day['demand'].sum():.2f} kWh")
+print(f"  price levels: {sorted(set(day['price']))} Rs/kWh")
+
+# ---- cell 4 ----
+day = get_day(df, "2026-09-11")
+
+# full 48-slot table: index, time, band, price
+print("idx  time    band       price")
+print("-" * 34)
+for i in range(SLOTS_PER_DAY):
+    print(f"{i:>3}  {day['slot'][i]:>5}   {day['band'][i]:<9}  {day['price'][i]:>5.0f}")
+
+# where do the bands change? (should land on 05:30, 18:30, 22:30)
+print("\nBand transitions:")
+prev = None
+for i in range(SLOTS_PER_DAY):
+    if day["band"][i] != prev:
+        print(f"  slot {i:>2} ({day['slot'][i]}) -> {day['band'][i]} (Rs {day['price'][i]:.0f})")
+        prev = day["band"][i]
+
+# how many slots in each band
+print("\nSlots per band:")
+bands, counts = np.unique(day["band"], return_counts=True)
+for b, n in zip(bands, counts):
+    print(f"  {b:<9}: {n} slots")
+
+# ---- cell 5 ----
+# Battery model parameters, shared with the DP: src/model.py
+from model import (CAPACITIES, SOC_RESERVE_FRAC, CHARGE_RATE_KW, DISCHARGE_RATE_KW,
+                   MAX_CHARGE_KWH, MAX_DISCHARGE_KWH, ETA_C, ETA_D)
+from heuristic_solver import PENALTY
+
+print(f"reserve {SOC_RESERVE_FRAC}, charge <= {MAX_CHARGE_KWH} kWh/slot, "
+      f"discharge <= {MAX_DISCHARGE_KWH} kWh/slot, eta_c = eta_d = {ETA_C} "
+      f"(calibrated from the logs, scripts/calibrate_eta.py), penalty {PENALTY:g}")
+
+# ---- cell 6 ----
+# The simulator is shared with the DP: src/model.py
+from model import simulate
+
+print(inspect.getsource(simulate))
+
+# ---- cell 7 ----
+day = get_day(df, "2026-09-11")
+
+# run the simulation on a do-nothing schedule (should match the no-battery baseline)
+result = simulate(np.zeros(SLOTS_PER_DAY), day, capacity=4)
+
+# inspect what the function returns
+print("Keys returned:", list(result.keys()))
+print(f"  bill      : Rs {result['bill']:.2f}")
+print(f"  violation : {result['violation']:.3f}")
+print(f"  feasible  : {result['feasible']}")
+print(f"  soc       : array of {len(result['soc'])} values (battery level each slot)")
+print(f"  soc[:5]   : {result['soc'][:5]}") # there are 48 values
+
+# ---- cell 8 ----
+from heuristic_solver import fitness
+
+print(inspect.getsource(fitness))
+
+# ---- cell 9 ----
+day = get_day(df, "2026-09-11")
+
+def report(name, r):
+    print(f"{name:<28} bill={r['bill']:>8.2f}  "
+          f"violation={r['violation']:>7.2f}  feasible={str(r['feasible']):>5}  "
+          f"fitness={r['fitness']:>10.2f}")
+
+# a feasible saving schedule
+good = np.zeros(SLOTS_PER_DAY)
+for t in [20, 22, 24, 26, 28]: good[t] = -0.5
+for t in range(37, 45): good[t] = min(0.12, day["demand"][t] - day["solar"][t])  # no export: at most the net load
+
+# an infeasible "cheat" schedule (discharges from an empty battery)
+cheat = np.zeros(SLOTS_PER_DAY)
+cheat[0] = 1.0
+cheat[1] = 1.0
+
+report("do-nothing (feasible)", fitness(np.zeros(SLOTS_PER_DAY), day, 4))
+report("sensible saver (feasible)", fitness(good, day, 4))
+report("cheat: empty discharge", fitness(cheat, day, 4))
+
+# ---- cell 10 ----
+from heuristic_solver import greedy_schedule
+
+print(inspect.getsource(greedy_schedule))
+
+# ---- cell 11 ----
+day = get_day(df, "2026-09-11")
+baseline = 160.91
+
+print("Greedy seed check (Sep 11):")
+for cap in CAPACITIES:  # [0, 2, 4, 7]
+    g = greedy_schedule(day, cap)
+    r = simulate(g, day, cap)
+    saving = baseline - r["bill"]
+    print(f"  cap={cap} kWh :  bill = Rs {r['bill']:6.2f}   "
+          f"feasible={r['feasible']}   saving = Rs {saving:5.2f} "
+          f"({100*saving/baseline:4.1f}%)")
+
+# show the greedy schedule for one capacity, slot by slot
+print("\nGreedy schedule for 4 kWh battery (non-zero slots only):")
+print(f"{'slot':>4} {'time':>5} {'band':<9} {'action':>8}  what")
+
+g = greedy_schedule(day, 4)
+for t in range(SLOTS_PER_DAY):
+    if abs(g[t]) > 1e-9:  # only show slots where something happens
+        action = "charge " if g[t] < 0 else "discharge"
+        print(f"{t:>4} {day['slot'][t]:>5} {day['band'][t]:<9} {g[t]:>+8.2f}  {action} {abs(g[t]):.2f} kWh")
+
+# ---- cell 12 ----
+from heuristic_solver import run_ga
+
+print(inspect.getsource(run_ga))
+
+# ---- cell 13 ----
+day = get_day(df, "2026-09-11")
+baseline = 160.91
+result = run_ga(day, capacity=4, seed=1)
+
+print("GA result (Sep 11, 4 kWh battery)")
+print(f"  bill      : Rs {result['bill']:.2f}")
+print(f"  feasible  : {result['feasible']}")
+print(f"  vs no-battery (Rs {baseline}) : saving Rs {baseline - result['bill']:.2f} "
+      f"({100*(baseline - result['bill'])/baseline:.1f}%)")
+greedy_bill = simulate(greedy_schedule(day, 4), day, 4)["bill"]
+print(f"  vs greedy (Rs {greedy_bill:.2f})          : Rs {greedy_bill - result['bill']:.2f} cheaper")
+print(f"  convergence : gen0={result['history'][0]:.1f} -> "
+      f"gen50={result['history'][49]:.1f} -> gen199={result['history'][-1]:.1f}")
+
+# ---- cell 14 ----
+# show the GA's optimized schedule (the solution)
+sch = result["schedule"]
+soc = result["soc"]
+
+print("GA optimized schedule (Sep 11, 4 kWh) — active slots only:")
+print(f"{'slot':>4} {'time':>5} {'band':<9} {'action':>8}  {'what':<18} {'SoC':>5}")
+
+for t in range(SLOTS_PER_DAY):
+    if abs(sch[t]) > 0.02:  # skip near-idle slots
+        act = "charge" if sch[t] < 0 else "discharge"
+        what = f"{act} {abs(sch[t]):.2f} kWh"
+        print(f"{t:>4} {day['slot'][t]:>5} {day['band'][t]:<9} "
+              f"{sch[t]:>+8.2f}  {what:<18} {soc[t]:>5.2f}")
+
+# ---- cell 15 ----
+import time
+
+DAYS = list_days(df)
+SEEDS = [1, 2, 3]
+
+rows = []
+all_feasible = True          # track across the whole sweep
+t0 = time.time()
+
+for date in DAYS:
+    day = get_day(df, date)
+    baseline = simulate(np.zeros(SLOTS_PER_DAY), day, 0)["bill"]
+
+    for cap in CAPACITIES:
+        runs = [run_ga(day, cap, seed=s) for s in SEEDS]   # keep full results
+        bills = [r["bill"] for r in runs]
+        feas  = [r["feasible"] for r in runs]              # feasibility of each seed
+
+        if not all(feas):
+            all_feasible = False
+            print(f"⚠️ INFEASIBLE: {date}, cap={cap} kWh — seeds feasible: {feas}")
+
+        rows.append({
+            "date": date,
+            "capacity": cap,
+            "baseline": round(baseline, 1),
+            "ga_mean": round(np.mean(bills), 1),
+            "ga_best": round(np.min(bills), 1),
+            "all_feasible": all(feas),                      # new column
+            "saving_pct": round(100 * (baseline - np.min(bills)) / baseline, 1)
+                if baseline > 0 else 0.0,
+        })
+
+results = pd.DataFrame(rows)
+
+print(f"\nCompleted {len(DAYS)*len(CAPACITIES)*len(SEEDS)} GA runs in {time.time()-t0:.1f}s")
+print(f"ALL RUNS FEASIBLE: {all_feasible}\n")      # the headline check
+print(results.to_string(index=False))
+
+# ---- cell 16 ----
+summary = results.groupby("capacity").agg(
+    avg_bill=("ga_best", "mean"),
+    avg_saving_pct=("saving_pct", "mean")
+).round(1)
+
+print("Average across the 5 days:")
+print(summary.to_string())
+
+# ---- cell 17 ----
+import matplotlib.pyplot as plt
+
+day = get_day(df, "2026-09-11")
+r = run_ga(day, capacity=4, seed=1)
+
+plt.figure(figsize=(7, 4))
+plt.plot(r["history"], color="#1a7f5a", lw=1.8, label="GA best fitness")
+plt.xlabel("Generation"); plt.ylabel("Best bill (Rs)")
+plt.title("GA convergence (Sep 11, 4 kWh)"); plt.legend(fontsize=8); plt.grid(alpha=0.3)
+plt.tight_layout(); plt.show()
+
+# ---- cell 18 ----
+sch, soc = r["schedule"], r["soc"]
+x = np.arange(SLOTS_PER_DAY)
+
+fig, ax1 = plt.subplots(figsize=(9, 4))
+colors = ["#2d8a5f" if a < 0 else "#c0562a" for a in sch]   # green=charge, red=discharge
+ax1.bar(x, sch, color=colors, width=0.8)
+ax1.axhline(0, color="#333", lw=0.6)
+ax1.axvspan(37, 44.5, color="#ffdede", alpha=0.5, zorder=0, label="Peak band")
+ax1.set_xlabel("Slot (0=00:00 ... 47=23:30)")
+ax1.set_ylabel("Battery action (kWh)  [− charge / + discharge]")
+ax1.set_title("GA optimized dispatch (Sep 11, 4 kWh)")
+
+ax2 = ax1.twinx()
+ax2.plot(x, soc, color="#2d5c86", lw=1.8, marker=".", ms=3, label="SoC")
+ax2.set_ylabel("State of charge (kWh)", color="#2d5c86")
+ax1.legend(loc="upper left", fontsize=8); ax2.legend(loc="upper right", fontsize=8)
+plt.tight_layout(); plt.show()
+
+# ---- cell 19 ----
+g = results.groupby("capacity")["saving_pct"].mean()
+plt.figure(figsize=(6.5, 4))
+plt.plot(g.index, g.values, "o-", color="#1a7f5a", lw=2, ms=8)
+for cap, val in g.items():
+    plt.annotate(f"{val:.0f}%", (cap, val), textcoords="offset points", xytext=(0, 8), fontsize=9)
+plt.xlabel("Battery capacity (kWh)"); plt.ylabel("Avg saving vs no-battery (%)")
+plt.title("Savings vs battery size (diminishing returns)"); plt.grid(alpha=0.3)
+plt.tight_layout(); plt.show()
+
+# ---- cell 20 ----
+# GA reliability: how much do results vary across the 3 random seeds?
+results["seed_spread"] = results["ga_mean"] - results["ga_best"]
+active = results[results["capacity"] > 0]      # exclude 0 kWh (nothing to optimize there)
+
+print("GA reliability (spread between mean and best bill across 3 seeds):")
+print(f"  average spread : Rs {active['seed_spread'].mean():.2f}")
+print(f"  maximum spread : Rs {active['seed_spread'].max():.2f}")
+print("  -> a small spread confirms the GA converges reliably, not by luck\n")
+
+print("Headline results (averaged across the 5 days):")
+print(f"  no-battery baseline : Rs {results[results.capacity==0]['baseline'].mean():.1f}/day")
+print(f"  7 kWh optimized     : Rs {results[results.capacity==7]['ga_best'].mean():.1f}/day")
+print(f"  max saving (7 kWh)  : {results[results.capacity==7]['saving_pct'].mean():.1f}%")
+print(f"  saving at 2 kWh     : {results[results.capacity==2]['saving_pct'].mean():.1f}%")
+print(f"  extra gain 4->7 kWh : "
+      f"{results[results.capacity==7]['saving_pct'].mean() - results[results.capacity==4]['saving_pct'].mean():.1f}% points (diminishing)")
+
+# ---- cell 21 ----
+
+from pathlib import Path
+
+# Set up the figures folder in the repository
+REPO_ROOT = Path.cwd().parent if Path.cwd().name == "notebooks" else Path.cwd()
+FIGURES_DIR = REPO_ROOT / "figures"
+FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+
+day = get_day(df, "2026-09-11")
+r = run_ga(day, capacity=4, seed=1)
+
+# Figure 1: GA convergence
+plt.figure(figsize=(7, 4))
+plt.plot(r["history"], color="#1a7f5a", lw=1.8, label="GA best fitness")
+plt.xlabel("Generation")
+plt.ylabel("Best bill (Rs)")
+plt.title("GA convergence (Sep 11, 4 kWh)")
+plt.legend(fontsize=8)
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.savefig(FIGURES_DIR / "ga_convergence.png", dpi=150)
+plt.close()
+
+# Figure 2: Optimized battery dispatch
+sch, soc = r["schedule"], r["soc"]
+x = np.arange(SLOTS_PER_DAY)
+
+fig, ax1 = plt.subplots(figsize=(9, 4))
+colors = ["#2d8a5f" if a < 0 else "#c0562a" for a in sch]
+
+ax1.bar(x, sch, color=colors, width=0.8)
+ax1.axhline(0, color="#333", lw=0.6)
+ax1.axvspan(37, 44.5, color="#ffdede", alpha=0.5, zorder=0, label="Peak band")
+ax1.set_xlabel("Slot (0=00:00 ... 47=23:30)")
+ax1.set_ylabel("Battery action (kWh)  [− charge / + discharge]")
+ax1.set_title("GA optimized dispatch (Sep 11, 4 kWh)")
+
+ax2 = ax1.twinx()
+ax2.plot(x, soc, color="#2d5c86", lw=1.8, marker=".", ms=3, label="SoC")
+ax2.set_ylabel("State of charge (kWh)", color="#2d5c86")
+
+ax1.legend(loc="upper left", fontsize=8)
+ax2.legend(loc="upper right", fontsize=8)
+plt.tight_layout()
+plt.savefig(FIGURES_DIR / "ga_dispatch_sep11_4kwh.png", dpi=150)
+plt.close()
+
+# Figure 3: Savings for different battery capacities
+g = results.groupby("capacity")["saving_pct"].mean()
+
+plt.figure(figsize=(6.5, 4))
+plt.plot(g.index, g.values, "o-", color="#1a7f5a", lw=2, ms=8)
+
+for cap, val in g.items():
+    plt.annotate(f"{val:.0f}%", (cap, val),
+                 textcoords="offset points", xytext=(0, 8), fontsize=9)
+
+plt.xlabel("Battery capacity (kWh)")
+plt.ylabel("Avg saving vs no-battery (%)")
+plt.title("Savings vs battery size (diminishing returns)")
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.savefig(FIGURES_DIR / "ga_savings_scaling.png", dpi=150)
+plt.close()
+
+print(f"Saved 3 figures to {FIGURES_DIR}")
+print("  - ga_convergence.png")
+print("  - ga_dispatch_sep11_4kwh.png")
+print("  - ga_savings_scaling.png")
