@@ -1,14 +1,13 @@
 WattWise - Battery Dispatch Optimization vs CEB Time-of-Use Tariffs
 Optimization Methods group assignment - Code Appendix
 Repository: https://github.com/Adore96/WattWise
-Generated 2026-10-11 from commit 5462820
+Generated 2026-10-13 from commit 07b552f
 
 Contents:
   src/compare.py
   src/dp_solver.py
   src/heuristic_solver.py
   src/model.py
-  scripts/build_code_appendix.py
   scripts/build_profiles.py
   scripts/calibrate_eta.py
   scripts/make_report_figures.py
@@ -698,93 +697,6 @@ def simulate(schedule, day, capacity, eta_c=ETA_C, eta_d=ETA_D,
 def baseline_bill(day):
     """Bill with no battery at all (C = 0)."""
     return float(np.sum(day["price"] * grid_import(day["demand"], day["solar"], 0.0)))
-
-==============================================================================
-scripts/build_code_appendix.py
-==============================================================================
-"""
-Builds the plain-text code appendix required by the submission:
-every Python source file plus the code cells of both notebooks, in one
-file with a header per file.
-
-Usage (from the repo root):
-    python scripts/build_code_appendix.py
-Writes report/code_appendix.txt
-"""
-import json
-import subprocess
-from datetime import date
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parent.parent
-OUT = ROOT / "report" / "code_appendix.txt"
-
-SOURCES = (
-    sorted((ROOT / "src").glob("*.py"))
-    + sorted((ROOT / "scripts").glob("*.py"))
-    + sorted((ROOT / "tests").glob("*.py"))
-    + [ROOT / "requirements.txt", ROOT / "pytest.ini"]
-)
-NOTEBOOKS = sorted((ROOT / "notebooks").glob("*.ipynb"))
-
-RULE = "=" * 78
-
-
-def header(title):
-    return f"\n{RULE}\n{title}\n{RULE}\n"
-
-
-def git_commit():
-    try:
-        return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT,
-                              capture_output=True, text=True, check=True).stdout.strip()
-    except Exception:
-        return "unknown"
-
-
-def notebook_code(path):
-    nb = json.loads(path.read_text(encoding="utf-8"))
-    parts = []
-    n = 0
-    for cell in nb.get("cells", []):
-        if cell.get("cell_type") != "code":
-            continue
-        src = "".join(cell.get("source", [])).rstrip()
-        if not src:
-            continue
-        n += 1
-        parts.append(f"# ---- cell {n} ----\n{src}\n")
-    return "\n".join(parts)
-
-
-def main():
-    OUT.parent.mkdir(exist_ok=True)
-    files = [p for p in SOURCES if p.exists()]
-    lines = [
-        "WattWise - Battery Dispatch Optimization vs CEB Time-of-Use Tariffs",
-        "Optimization Methods group assignment - Code Appendix",
-        "Repository: https://github.com/Adore96/WattWise",
-        f"Generated {date.today().isoformat()} from commit {git_commit()}",
-        "",
-        "Contents:",
-    ]
-    lines += [f"  {p.relative_to(ROOT).as_posix()}" for p in files + NOTEBOOKS]
-    text = "\n".join(lines) + "\n"
-
-    for p in files:
-        text += header(p.relative_to(ROOT).as_posix())
-        text += p.read_text(encoding="utf-8").rstrip() + "\n"
-    for p in NOTEBOOKS:
-        text += header(f"{p.relative_to(ROOT).as_posix()}  (code cells only)")
-        text += notebook_code(p)
-
-    OUT.write_text(text, encoding="utf-8")
-    print(f"wrote {OUT.relative_to(ROOT)}: {len(files) + len(NOTEBOOKS)} files, "
-          f"{text.count(chr(10))} lines")
-
-
-if __name__ == "__main__":
-    main()
 
 ==============================================================================
 scripts/build_profiles.py

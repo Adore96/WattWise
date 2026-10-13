@@ -21,7 +21,7 @@ Decide how much to charge or discharge a home battery in every 30-minute slot of
 | Day      | 05:30–18:30 | Rs 47/kWh  |
 | Peak     | 18:30–22:30 | Rs 106/kWh |
 
-*(CEB optional domestic Time-of-Use tariff, May 2026 revision — reverify against the current official CEB/PUCSL sheet before the tariffs go in the final report.)*
+*(CEB optional domestic Time-of-Use tariff, May 2026 revision.)*
 
 Because the real household's 7 kWh battery already makes it close to grid-independent (~6 kWh/month drawn from the grid), we don't optimize a single fixed capacity — we sweep **battery capacity across 0 / 2 / 4 / 7 kWh**, using the same real load and solar data at every size, so the comparison shows
 *where* optimized dispatch actually matters rather than a single, thin result.
@@ -47,7 +47,8 @@ Five real days of household inverter/monitoring logs, 5-minute resolution, resam
 │   └── profiles_30min.csv            # cleaned, resampled output: 5 days × 48 slots
 ├── scripts/
 │   ├── build_profiles.py             # raw 5-min logs -> tariff-aligned 30-min profile table
-│   └── calibrate_eta.py              # fits battery efficiency + capacity to the logged SOC
+│   ├── calibrate_eta.py              # fits battery efficiency + capacity to the logged SOC
+│   └── make_report_figures.py        # explanatory report figures (system, tariff, DP grid, GA loop)
 ├── src/
 │   ├── model.py                      # shared problem: data, parameters, simulate() (bill + constraint check)
 │   ├── dp_solver.py                  # exact method: backward-induction DP over a discretised SoC grid
@@ -60,7 +61,6 @@ Five real days of household inverter/monitoring logs, 5-minute resolution, resam
 │   └── heuristic_energy_optimization.ipynb  # GA walkthrough and experiments
 ├── results/                          # experiment outputs (CSV) and machine spec
 ├── figures/                          # plots for the report
-├── Assignment.docx                   # assignment brief
 ├── requirements.txt
 ├── pytest.ini                        # pythonpath = src, so tests import the solvers directly
 └── README.md
@@ -173,6 +173,7 @@ Full tables in `results/`, plots in `figures/`, walkthrough in `notebooks/dp_sol
 | `figures/eta_replay.png` | logged vs replayed SOC (fitted vs placeholder η) | `scripts/calibrate_eta.py` |
 | `figures/dp_*.png`, `horizon_scaling.png` | DP dispatch (Sep 11, 4 kWh), δ scaling, DP vs GA quality, horizon scaling | `notebooks/dp_solver.ipynb` |
 | `figures/ga_*.png` | GA convergence, GA dispatch (Sep 11, 4 kWh), GA savings vs battery size | `notebooks/heuristic_energy_optimization.ipynb` |
+| `figures/report_*.png` | system diagram, tariff profile, DP stage grid, GA loop (report figures) | `scripts/make_report_figures.py` |
 
 ## Status
 
