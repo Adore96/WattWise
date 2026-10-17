@@ -54,7 +54,7 @@ def step_limits(delta, eta_c=model.ETA_C, eta_d=model.ETA_D,
                 max_charge=model.MAX_CHARGE_KWH, max_discharge=model.MAX_DISCHARGE_KWH):
     """Rate limits (house side) as caps on the number of grid steps per slot.
     Always round DOWN: rounding up would allow a move above the rate limit."""
-    k_charge = math.floor(max_charge * eta_c / delta + 1e-9)        # |a| = k*delta/eta_c <= max_charge
+    k_charge = math.floor(max_charge * eta_c / delta + 1e-9)  # |a| = k*delta/eta_c <= max_charge
     k_discharge = math.floor(max_discharge / (eta_d * delta) + 1e-9)  # a = k*delta*eta_d <= max_discharge
     return k_charge, k_discharge
 
@@ -90,19 +90,19 @@ def solve_dp(day, capacity, delta=None, eta_c=model.ETA_C, eta_d=model.ETA_D,
     moves = sorted(range(-k_charge, k_discharge + 1), key=lambda k: (abs(k), k))
     a_of = {k: (k * delta * eta_d if k >= 0 else k * delta / eta_c) for k in moves}
 
-    V = np.zeros((T + 1, n_states))               # V[T] = 0: terminal value
-    K = np.zeros((T, n_states), dtype=np.int32)   # policy: best k at (t, i)
+    V = np.zeros((T + 1, n_states))  # V[T] = 0: terminal value
+    K = np.zeros((T, n_states), dtype=np.int32)  # policy: best k at (t, i)
     idx = np.arange(n_states)
 
-    for t in range(T - 1, -1, -1):                # backward induction
+    for t in range(T - 1, -1, -1):  # backward induction
         best = np.full(n_states, np.inf)
         best_k = np.zeros(n_states, dtype=np.int32)
         for k in moves:
             a = a_of[k]
-            if a > net_load[t] + EPS:             # no export
+            if a > net_load[t] + EPS:  # no export
                 continue
-            j = idx - k                            # next state for every i
-            ok = (j >= 0) & (j < n_states)        # stays inside [soc_min, C]
+            j = idx - k  # next state for every i
+            ok = (j >= 0) & (j < n_states)  # stays inside [soc_min, C]
             cost_now = price[t] * max(0.0, demand[t] - solar[t] - a)
             q = np.full(n_states, np.inf)
             q[ok] = cost_now + V[t + 1, j[ok]]

@@ -10,6 +10,7 @@ Writes figures/report_*.png
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch, FancyArrowPatch, Rectangle
@@ -21,12 +22,12 @@ FIG = ROOT / "figures"
 DATA = ROOT / "data" / "profiles_30min.csv"
 
 # ---- shared palette (same hex codes as notebooks/dp_solver.ipynb)
-DP = "#2d5c86"        # DP / SoC
-GA = "#1a7f5a"        # GA
-SOLAR = "#e0a400"     # solar, greedy
-LOAD = "#bbbbbb"      # load
-DISCH = "#c0562a"     # battery discharge
-CHARGE = "#2d8a5f"    # battery charge
+DP = "#2d5c86"  # DP / SoC
+GA = "#1a7f5a"  # GA
+SOLAR = "#e0a400"  # solar, greedy
+LOAD = "#bbbbbb"  # load
+DISCH = "#c0562a"  # battery discharge
+CHARGE = "#2d8a5f"  # battery charge
 INK = "#333333"
 BAND_BG = {"Off-Peak": "#e8f1fb", "Day": "#fbf6e8", "Peak": "#fbe8e8"}
 BAND_FG = {"Off-Peak": "#6f9fd8", "Day": "#e0b84a", "Peak": "#d0605a"}
@@ -51,7 +52,9 @@ def arrow(ax, p, q, color=INK, lw=1.6, style="-|>", rad=0.0, ls="-"):
 # ------------------------------------------------------------------ 1. system
 def system_diagram():
     fig, ax = plt.subplots(figsize=(9, 4.6))
-    ax.set_xlim(0, 10); ax.set_ylim(0, 5.2); ax.axis("off")
+    ax.set_xlim(0, 10);
+    ax.set_ylim(0, 5.2);
+    ax.axis("off")
 
     box(ax, (0.2, 3.5), 2.4, 1.3, "Solar PV\n$g_t$ (kWh / slot)", "#fdf3d6", ec=SOLAR, bold=False)
     box(ax, (0.2, 0.4), 2.4, 1.5, "Battery\nC ∈ {0, 2, 4, 7} kWh\n2.2 kW in / 2.5 kW out\nη = 0.91 each way",
@@ -100,7 +103,8 @@ def tariff_profile(date="2026-09-11"):
     # tariff step
     for t, band in enumerate(d["band"]):
         a0.add_patch(Rectangle((t - 0.5, 0), 1, RATE[band], fc=BAND_FG[band], ec="none"))
-    a0.set_ylim(0, 125); a0.set_ylabel("Rs/kWh")
+    a0.set_ylim(0, 125);
+    a0.set_ylabel("Rs/kWh")
     a0.set_yticks([0, 50, 100])
     for band, xc in [("Off-Peak", 5), ("Day", 23.5), ("Peak", 40.5)]:
         a0.text(xc, RATE[band] + 4, f"{band}  Rs {RATE[band]}", ha="center", fontsize=8.5)
@@ -125,7 +129,7 @@ def tariff_profile(date="2026-09-11"):
 
 # ------------------------------------------------------------------ 3. DP stage grid
 def dp_grid():
-    T, N = 9, 5                          # schematic: 9 stages, 5 SoC levels
+    T, N = 9, 5  # schematic: 9 stages, 5 SoC levels
     bands = ["Off-Peak"] * 3 + ["Day"] * 3 + ["Peak"] * 3
     path = [0, 1, 2, 3, 3, 3, 3, 2, 1, 0]  # SoC index before slot 0 .. after slot T-1
 
@@ -166,7 +170,8 @@ def dp_grid():
     ax.set_yticklabels(["0.2·C\n(floor)", "", "SoC levels\nstep δ", "", "C\n(full)"], fontsize=8)
     ax.set_xticks([t + 0.5 for t in range(T + 1)])
     ax.set_xticklabels([f"t={t}" for t in range(T)] + ["T"], fontsize=8)
-    ax.set_xlim(0.2, T + 0.8); ax.set_ylim(-2.4, N + 0.1)
+    ax.set_xlim(0.2, T + 0.8);
+    ax.set_ylim(-2.4, N + 0.1)
     ax.spines[["top", "right", "bottom"]].set_visible(False)
     ax.set_title("$V_t(s) = \\min_k \\; [\\, p_t \\cdot \\max(0,\\, d_t - g_t - a(k)) + V_{t+1}(s - k\\delta) \\,]$",
                  fontsize=11)
@@ -177,13 +182,15 @@ def dp_grid():
 # ------------------------------------------------------------------ 4. GA loop
 def ga_loop():
     fig, ax = plt.subplots(figsize=(9, 5.4))
-    ax.set_xlim(0, 10); ax.set_ylim(0, 6.2); ax.axis("off")
+    ax.set_xlim(0, 10);
+    ax.set_ylim(0, 6.2);
+    ax.axis("off")
 
     # chromosome strip
     rng = np.random.default_rng(3)
     genes = np.r_[np.zeros(10), -rng.uniform(0.1, 0.9, 6), rng.uniform(0, 0.3, 4) * 0,
-                  -rng.uniform(0.05, 0.4, 12), rng.uniform(0.1, 0.5, 4), rng.uniform(0.05, 0.12, 8),
-                  np.zeros(4)][:48]
+    -rng.uniform(0.05, 0.4, 12), rng.uniform(0.1, 0.5, 4), rng.uniform(0.05, 0.12, 8),
+    np.zeros(4)][:48]
     x0, w = 0.6, 8.8 / 48
     for t, g in enumerate(genes):
         c = CHARGE if g < 0 else (DISCH if g > 0 else "#e6e6e6")
@@ -196,9 +203,9 @@ def ga_loop():
     nodes = {
         "init": (0.3, 3.55, "1. Initial population (100)\nrandom + greedy seed\n+ do-nothing seed", "#eef6f1"),
         "eval": (3.7, 3.55, "2. Evaluate fitness\nbill + 10⁵ × violation\n(shared simulate())", "#ffffff"),
-        "sel":  (7.1, 3.55, "3. Tournament\nselection (k = 3)", "#eef6f1"),
-        "cx":   (7.1, 1.85, "4. Blend crossover\n(rate 0.8)", "#eef6f1"),
-        "mut":  (3.7, 1.85, "5. Gaussian mutation\n(rate 0.1, σ = 0.2)\n+ clip genes to bounds", "#eef6f1"),
+        "sel": (7.1, 3.55, "3. Tournament\nselection (k = 3)", "#eef6f1"),
+        "cx": (7.1, 1.85, "4. Blend crossover\n(rate 0.8)", "#eef6f1"),
+        "mut": (3.7, 1.85, "5. Gaussian mutation\n(rate 0.1, σ = 0.2)\n+ clip genes to bounds", "#eef6f1"),
         "elite": (0.3, 1.85, "6. Elitism: carry best 2\n→ next generation", "#eef6f1"),
     }
     for key, (x, y, txt, fc) in nodes.items():

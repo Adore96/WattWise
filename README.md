@@ -1,13 +1,14 @@
 # Dispatch Duo — Battery Dispatch Optimization vs CEB Time-of-Use Tariffs
 
-Optimization Methods (MSc AI) group assignment. We optimize when a home battery should charge or discharge over the day to minimize the electricity bill under Sri Lanka's CEB Time-of-Use tariff, comparing an exact method (Dynamic Programming) against a heuristic (Genetic Algorithm) across a sweep of battery sizes.
+Optimization Methods (MSc AI) group assignment. We optimize when a home battery should charge or discharge over the day to minimize the electricity bill under Sri Lanka's CEB Time-of-Use tariff, comparing an exact method (Dynamic Programming) against a heuristic (Genetic Algorithm) across a sweep of
+battery sizes.
 
 ## Team
 
-| Member  | Role                                                                |
-|---------|---------------------------------------------------------------------|
-| Kasun   | Data pipeline, DP (exact method) solver, results & discussion       |
-| Bimsara | Heuristic (GA) solver, mathematical formulation, report sections    |
+| Member  | Role                                                             |
+|---------|------------------------------------------------------------------|
+| Kasun   | Data pipeline, DP (exact method) solver, results & discussion    |
+| Bimsara | Heuristic (GA) solver, mathematical formulation, report sections |
 
 Split by module, not by task.
 
@@ -33,7 +34,8 @@ Five real days of household inverter/monitoring logs, 5-minute resolution, resam
 - **Source**: Kasun's own solar + battery system (Production, Consumption, Grid, Battery power, Battery SOC%). Not synthetic, not third-party.
 - **Days used**: Sep 10, 11, 13, 16, 17, 2026.
 - **Sign convention**: positive `Battery(kW)` = discharging, negative = charging (verified against the logs, not assumed).
-- **Known data notes**: Sep 12's original log had a ~3-hour gap (39 missing 5-minute rows) during the production ramp and was dropped in favor of a re-logged Sep 13; it is kept in `data/raw/excluded/` as evidence and is not picked up by the pipeline. Sep 11 is missing one 5-minute reading at 05:20 (interpolated, negligible). Full write-up of every data issue and fix is in the report's Data Description
+- **Known data notes**: Sep 12's original log had a ~3-hour gap (39 missing 5-minute rows) during the production ramp and was dropped in favor of a re-logged Sep 13; it is kept in `data/raw/excluded/` as evidence and is not picked up by the pipeline. Sep 11 is missing one 5-minute reading at 05:20
+  (interpolated, negligible). Full write-up of every data issue and fix is in the report's Data Description
   section.
   The five raw `.xlsx` logs are committed in `data/raw/`; run `scripts/build_profiles.py` to regenerate `data/profiles_30min.csv` from them (the output is reproduced exactly).
 
@@ -110,8 +112,7 @@ jupyter notebook notebooks/
 
 - **Exact method — Dynamic Programming.** Stage: 30-minute slot. State: SoC level on a grid
   `0.2·C, 0.2·C + δ, …, C`. Action: move `k` grid steps (next state always on the grid, so no rounding
-  or value-function interpolation); the house-side energy is backed out of the move
-  (`a = k·δ·η_d` discharging, `a = k·δ/η_c` charging). Solved by backward induction (`V_T = 0`), and the
+  or value-function interpolation); the house-side energy is backed out of the move (`a = k·δ·η_d` discharging, `a = k·δ/η_c` charging). Solved by backward induction (`V_T = 0`), and the
   schedule is recovered by a forward pass through the policy table. Exact for the discretised model;
   δ = 0.001 kWh keeps the bill within ~1 % of the continuous optimum (see `notebooks/dp_solver.ipynb`).
   Validated against a hand-solved example (`tests/`), and every DP schedule is replayed through the
@@ -128,15 +129,15 @@ jupyter notebook notebooks/
 
 ### Model assumptions
 
-| Item               | Rule                                                                                                                                 |
-|--------------------|--------------------------------------------------------------------------------------------------------------------------------------|
-| Usable capacity    | `0.2·C ≤ SoC_t ≤ C` (20% reserve; confirm against datasheet). C ∈ {0, 2, 4, 7} kWh                                                   |
-| Rate               | `−R_c·Δt ≤ a_t ≤ R_d·Δt`, Δt = 0.5 h (logs show ~2.2 kW charge / ~2.5 kW discharge)                                                  |
+| Item               | Rule                                                                                                                                          |
+|--------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
+| Usable capacity    | `0.2·C ≤ SoC_t ≤ C` (20% reserve; confirm against datasheet). C ∈ {0, 2, 4, 7} kWh                                                            |
+| Rate               | `−R_c·Δt ≤ a_t ≤ R_d·Δt`, Δt = 0.5 h (logs show ~2.2 kW charge / ~2.5 kW discharge)                                                           |
 | SoC transition     | discharge: `SoC − a_t/η_d`; charge: `SoC + \|a_t\|·η_c`, η_c = η_d = 0.91 (round trip 0.83, fitted to the logs by `scripts/calibrate_eta.py`) |
-| No export          | `a_t ≤ max(0, d_t − g_t)`; surplus solar beyond load + battery is curtailed at zero value                                            |
-| Grid import / cost | `grid_t = max(0, d_t − g_t − a_t)`; cost = `Σ price_t · grid_t` (a definition, not a constraint — the grid is an unlimited backstop) |
-| Grid charging      | allowed in the model; verify against the inverter's actual configuration                                                             |
-| Start / end of day | every day starts at the reserve floor `0.2·C`; energy left at the end has no value (`V_T = 0`)                                       |
+| No export          | `a_t ≤ max(0, d_t − g_t)`; surplus solar beyond load + battery is curtailed at zero value                                                     |
+| Grid import / cost | `grid_t = max(0, d_t − g_t − a_t)`; cost = `Σ price_t · grid_t` (a definition, not a constraint — the grid is an unlimited backstop)          |
+| Grid charging      | allowed in the model; verify against the inverter's actual configuration                                                                      |
+| Start / end of day | every day starts at the reserve floor `0.2·C`; energy left at the end has no value (`V_T = 0`)                                                |
 
 ## Results (summary)
 
@@ -146,9 +147,9 @@ Full tables in `results/`, plots in `figures/`, walkthrough in `notebooks/dp_sol
 
 | Battery | No battery | Greedy rule | GA (mean / best seed) | DP (exact) | DP saving | GA feasible | Runtime DP / GA |
 |---------|-----------:|------------:|----------------------:|-----------:|----------:|------------:|----------------:|
-| 2 kWh   | Rs 196.7   | Rs 103.4    | Rs 89.3 / 84.9        | Rs 76.8    | 61 %      | 100 %       | 0.9 s / 1.4 s   |
-| 4 kWh   | Rs 196.7   | Rs 93.3     | Rs 66.5 / 63.4        | Rs 56.9    | 71 %      | 100 %       | 1.5 s / 1.6 s   |
-| 7 kWh   | Rs 196.7   | Rs 93.3     | Rs 62.2 / 59.4        | Rs 54.8    | 72 %      | 100 %       | 2.2 s / 1.6 s   |
+| 2 kWh   |   Rs 196.7 |    Rs 103.4 |        Rs 89.3 / 84.9 |    Rs 76.8 |      61 % |       100 % |   0.9 s / 1.4 s |
+| 4 kWh   |   Rs 196.7 |     Rs 93.3 |        Rs 66.5 / 63.4 |    Rs 56.9 |      71 % |       100 % |   1.5 s / 1.6 s |
+| 7 kWh   |   Rs 196.7 |     Rs 93.3 |        Rs 62.2 / 59.4 |    Rs 54.8 |      72 % |       100 % |   2.2 s / 1.6 s |
 
 - Every DP schedule is feasible on replay, and no GA run beat the DP. The GA's mean gap is 15–24 %,
   and no GA run with a battery got within 1 % of the DP optimum.
@@ -161,19 +162,19 @@ Full tables in `results/`, plots in `figures/`, walkthrough in `notebooks/dp_sol
 
 ## Outputs
 
-| File | Contents | Produced by |
-|------|----------|-------------|
-| `results/sweep_summary.csv` | per day × capacity: baseline, greedy, DP bill/runtime/replay check, GA best/mean/worst, gap, feasibility | `src/compare.py` |
-| `results/sweep_ga_runs.csv` | every GA run (day × capacity × seed) | `src/compare.py` |
-| `results/scaling_delta.csv` | DP bill, state count and runtime vs SoC grid step δ (C = 7) | `src/compare.py` |
-| `results/scaling_horizon.csv`, `scaling_horizon_ga_runs.csv` | 1 / 2 / 5 chained days: DP vs GA, plus independent-days DP bill | `src/compare.py` |
-| `results/eta_sensitivity.csv` | DP bill and saving for η ∈ {0.91, 0.95, 1.0} | `src/compare.py` |
-| `results/eta_calibration.csv`, `eta_replay_errors.csv` | fitted round-trip efficiency / capacity, SOC replay errors | `scripts/calibrate_eta.py` |
-| `results/machine.txt` | machine, library versions and run settings used for timing | `src/compare.py` |
-| `figures/eta_replay.png` | logged vs replayed SOC (fitted vs placeholder η) | `scripts/calibrate_eta.py` |
-| `figures/dp_*.png`, `horizon_scaling.png` | DP dispatch (Sep 11, 4 kWh), δ scaling, DP vs GA quality, horizon scaling | `notebooks/dp_solver.ipynb` |
-| `figures/ga_*.png` | GA convergence, GA dispatch (Sep 11, 4 kWh), GA savings vs battery size | `notebooks/heuristic_energy_optimization.ipynb` |
-| `figures/report_*.png` | system diagram, tariff profile, DP stage grid, GA loop (report figures) | `scripts/make_report_figures.py` |
+| File                                                         | Contents                                                                                                 | Produced by                                     |
+|--------------------------------------------------------------|----------------------------------------------------------------------------------------------------------|-------------------------------------------------|
+| `results/sweep_summary.csv`                                  | per day × capacity: baseline, greedy, DP bill/runtime/replay check, GA best/mean/worst, gap, feasibility | `src/compare.py`                                |
+| `results/sweep_ga_runs.csv`                                  | every GA run (day × capacity × seed)                                                                     | `src/compare.py`                                |
+| `results/scaling_delta.csv`                                  | DP bill, state count and runtime vs SoC grid step δ (C = 7)                                              | `src/compare.py`                                |
+| `results/scaling_horizon.csv`, `scaling_horizon_ga_runs.csv` | 1 / 2 / 5 chained days: DP vs GA, plus independent-days DP bill                                          | `src/compare.py`                                |
+| `results/eta_sensitivity.csv`                                | DP bill and saving for η ∈ {0.91, 0.95, 1.0}                                                             | `src/compare.py`                                |
+| `results/eta_calibration.csv`, `eta_replay_errors.csv`       | fitted round-trip efficiency / capacity, SOC replay errors                                               | `scripts/calibrate_eta.py`                      |
+| `results/machine.txt`                                        | machine, library versions and run settings used for timing                                               | `src/compare.py`                                |
+| `figures/eta_replay.png`                                     | logged vs replayed SOC (fitted vs placeholder η)                                                         | `scripts/calibrate_eta.py`                      |
+| `figures/dp_*.png`, `horizon_scaling.png`                    | DP dispatch (Sep 11, 4 kWh), δ scaling, DP vs GA quality, horizon scaling                                | `notebooks/dp_solver.ipynb`                     |
+| `figures/ga_*.png`                                           | GA convergence, GA dispatch (Sep 11, 4 kWh), GA savings vs battery size                                  | `notebooks/heuristic_energy_optimization.ipynb` |
+| `figures/report_*.png`                                       | system diagram, tariff profile, DP stage grid, GA loop (report figures)                                  | `scripts/make_report_figures.py`                |
 
 ## Status
 

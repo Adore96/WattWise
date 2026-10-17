@@ -81,7 +81,7 @@ def run_ga(day, capacity, pop_size=100, generations=200, cx_rate=0.8,
     # initial population: mostly small-random, plus a greedy seed and a zero seed
     pop = rng.normal(0, 0.3, size=(pop_size, n)).clip(lo, hi)
     pop[0] = greedy_schedule(day, capacity)  # warm-start seed
-    pop[1] = 0.0                             # do-nothing seed (always feasible)
+    pop[1] = 0.0  # do-nothing seed (always feasible)
     fits = np.array([fitness(ind, day, capacity)["fitness"] for ind in pop])
     history = []
 
@@ -102,9 +102,9 @@ def run_ga(day, capacity, pop_size=100, generations=200, cx_rate=0.8,
             else:
                 child = p1.copy()
 
-            m = rng.random(n) < mut_rate       # Gaussian mutation
+            m = rng.random(n) < mut_rate  # Gaussian mutation
             child[m] += rng.normal(0, mut_sigma, size=m.sum())
-            child = child.clip(lo, hi)         # clamp to rate limits and no-export
+            child = child.clip(lo, hi)  # clamp to rate limits and no-export
             next_pop.append(child)
 
         pop = np.array(next_pop)

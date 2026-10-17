@@ -15,17 +15,17 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 DATA_PATH = ROOT / "data" / "profiles_30min.csv"
 
-SLOTS_PER_DAY = 48          # 30-minute slots
-SLOT_HOURS = 0.5            # dt
+SLOTS_PER_DAY = 48  # 30-minute slots
+SLOT_HOURS = 0.5  # dt
 
-CAPACITIES = [0, 2, 4, 7]   # kWh, the capacity sweep
+CAPACITIES = [0, 2, 4, 7]  # kWh, the capacity sweep
 
-SOC_RESERVE_FRAC = 0.2      # usable SoC range is [0.2*C, C]
+SOC_RESERVE_FRAC = 0.2  # usable SoC range is [0.2*C, C]
 
-CHARGE_RATE_KW = 2.2        # R_c, observed in the logs
-DISCHARGE_RATE_KW = 2.5     # R_d, observed in the logs
-MAX_CHARGE_KWH = CHARGE_RATE_KW * SLOT_HOURS          # 1.10 kWh per slot (house side)
-MAX_DISCHARGE_KWH = DISCHARGE_RATE_KW * SLOT_HOURS    # 1.25 kWh per slot (house side)
+CHARGE_RATE_KW = 2.2  # R_c, observed in the logs
+DISCHARGE_RATE_KW = 2.5  # R_d, observed in the logs
+MAX_CHARGE_KWH = CHARGE_RATE_KW * SLOT_HOURS  # 1.10 kWh per slot (house side)
+MAX_DISCHARGE_KWH = DISCHARGE_RATE_KW * SLOT_HOURS  # 1.25 kWh per slot (house side)
 
 # Charge / discharge efficiency, calibrated from the 5-minute logs by
 # scripts/calibrate_eta.py: round trip eta_c*eta_d = 0.83, split symmetrically
@@ -33,7 +33,7 @@ MAX_DISCHARGE_KWH = DISCHARGE_RATE_KW * SLOT_HOURS    # 1.25 kWh per slot (house
 ETA_C = 0.91
 ETA_D = 0.91
 
-TOL = 1e-9                  # numerical tolerance for constraint checks
+TOL = 1e-9  # numerical tolerance for constraint checks
 
 
 # ---------------------------------------------------------------- data

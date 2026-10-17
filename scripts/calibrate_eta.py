@@ -41,8 +41,8 @@ ROOT = Path(__file__).resolve().parent.parent
 RESULTS = ROOT / "results"
 FIGURES = ROOT / "figures"
 
-STEP_H = 5 / 60          # 5-minute samples
-WINDOW = 6               # 6 x 5 min = 30-minute differences
+STEP_H = 5 / 60  # 5-minute samples
+WINDOW = 6  # 6 x 5 min = 30-minute differences
 PLAUSIBLE_ETA = (0.85, 0.99)
 PLAUSIBLE_CAP = (5.5, 8.5)  # kWh around the 7 kWh nameplate
 FULL_SOC_PCT = 99

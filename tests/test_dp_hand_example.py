@@ -6,11 +6,10 @@ no solar, eta = 1, no reserve, start empty.
 Do nothing: buy 1 kWh at peak = 106.  Optimal: charge off-peak, hold,
 discharge at peak = 33.
 """
+import model
 import numpy as np
 import pytest
-
 from dp_solver import solve_dp
-import model
 
 HAND_DAY = {
     "solar": np.array([0.0, 0.0, 0.0]),
@@ -29,11 +28,11 @@ def test_value_and_policy_tables_delta_1():
     # V[t] = [V_t(s=0), V_t(s=1)], computed by hand (t = 0 is slot 1)
     assert np.allclose(res["V"], [[33, 0], [47, 0], [106, 0], [0, 0]])
     # policy in steps: -1 charge, 0 hold, +1 discharge
-    assert res["K"][0, 0] == -1   # slot 1, empty: charge at 33
-    assert res["K"][1, 0] == -1   # slot 2, empty: charge at 47 beats buying at 106
-    assert res["K"][1, 1] == 0    # slot 2, full: hold
-    assert res["K"][2, 0] == 0    # slot 3, empty: nothing to discharge, buy
-    assert res["K"][2, 1] == 1    # slot 3, full: discharge
+    assert res["K"][0, 0] == -1  # slot 1, empty: charge at 33
+    assert res["K"][1, 0] == -1  # slot 2, empty: charge at 47 beats buying at 106
+    assert res["K"][1, 1] == 0  # slot 2, full: hold
+    assert res["K"][2, 0] == 0  # slot 3, empty: nothing to discharge, buy
+    assert res["K"][2, 1] == 1  # slot 3, full: discharge
     assert np.allclose(res["schedule"], [-1, 0, 1])
     assert res["bill"] == pytest.approx(33.0)
 

@@ -21,7 +21,6 @@ import argparse
 import platform
 import statistics
 import time
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
